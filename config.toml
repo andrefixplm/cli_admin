@@ -1,0 +1,81 @@
+# ==============================================================================
+# CLI Admin - Arquivo de Configuração Principal (config.toml)
+# ==============================================================================
+# Este arquivo externaliza todas as configurações da aplicação para permitir
+# fácil customização e portabilidade sem necessidade de recompilação.
+
+[general]
+# Intervalo de atualização da TUI e métricas em milissegundos
+refresh_rate_ms = 1000
+# Nível de log: "trace", "debug", "info", "warn", "error"
+log_level = "info"
+# Caminho do arquivo de log rotativo
+log_file = "admin.log"
+# Habilitar logs no stdout (útil em modo CLI)
+log_to_stdout = false
+
+[vmware]
+# Caminho completo para o executável vmrun.exe do VMware Workstation
+# Se não especificado ou não encontrado, tentará o caminho padrão do VMware Workstation.
+vmrun_path = "C:\\Program Files (x86)\\VMware\\VMware Workstation\\vmrun.exe"
+
+# Modo padrão de inicialização de VMs: "nogui" (segundo plano) ou "gui" (abre janela)
+default_start_mode = "nogui"
+
+# Modo padrão de encerramento: "soft" (desligamento limpo do guest OS) ou "hard" (power off)
+default_stop_mode = "soft"
+
+# Diretórios para varredura recursiva de arquivos de máquinas virtuais (.vmx)
+scan_directories = [
+    "D:\\VM",
+    "D:\\VMs",
+    "C:\\Users\\andre\\Documents\\Virtual Machines"
+]
+
+# Aliases / Apelidos amigáveis para máquinas virtuais frequentes
+[[vmware.vms]]
+alias = "tc-dcta"
+name = "Teamcenter DCTA Windows Server 2019"
+path = "D:\\VM\\TC_DCTA\\Windows_Server_2019.vmx"
+
+[[vmware.vms]]
+alias = "tc14"
+name = "Teamcenter 14.3 Server"
+path = "D:\\VMs\\TC14\\tc14.vmx"
+
+[[vmware.vms]]
+alias = "win11-nx"
+name = "Windows 11 CAD & NX 2312"
+path = "D:\\VMs\\Win11_NX\\win11_nx.vmx"
+
+[metrics]
+# Campo de ordenação padrão para o TOP: "cpu", "ram", "io", "gpu", "vram"
+default_sort = "vram"
+
+# Quantidade de processos a listar no comando CLI top
+top_process_count = 30
+
+# Habilitar monitoramento de contadores PDH de GPU e VRAM no Windows
+enable_gpu_metrics = true
+
+# Habilitar telemetria opcional de GPU NVIDIA (temperatura, watts) caso disponível
+enable_nvml = true
+
+[security]
+# Lista de processos críticos do sistema operacional protegidos contra encerramento acidental
+protected_processes = [
+    "csrss.exe",
+    "svchost.exe",
+    "explorer.exe",
+    "winlogon.exe",
+    "services.exe",
+    "lsass.exe",
+    "smss.exe",
+    "system",
+    "registry",
+    "dwm.exe",
+    "fontdrvhost.exe"
+]
+
+# Exigir confirmação visual antes de matar qualquer processo
+require_kill_confirmation = true
