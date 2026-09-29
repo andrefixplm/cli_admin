@@ -79,3 +79,7 @@ protected_processes = [
 
 # Exigir confirmação visual antes de matar qualquer processo
 require_kill_confirmation = true
+
+[[vmware.vms]]
+alias = "win11-dev"
+path = "D:\\VM\\WIN11\\Windows 11 x64.vmx"

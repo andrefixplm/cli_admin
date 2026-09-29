@@ -13,6 +13,16 @@ pub struct AppConfig {
     pub metrics: MetricsConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+    #[serde(default)]
+    pub licensing: LicensingConfig,
+    #[serde(default)]
+    pub notes: NotesConfig,
+    #[serde(default)]
+    pub netdiag: NetdiagConfig,
+    #[serde(default)]
+    pub solidworks: SolidworksConfig,
+    #[serde(default)]
+    pub support: SupportConfig,
 }
 
 impl Default for AppConfig {
@@ -22,6 +32,11 @@ impl Default for AppConfig {
             vmware: VmwareConfig::default(),
             metrics: MetricsConfig::default(),
             security: SecurityConfig::default(),
+            licensing: LicensingConfig::default(),
+            notes: NotesConfig::default(),
+            netdiag: NetdiagConfig::default(),
+            solidworks: SolidworksConfig::default(),
+            support: SupportConfig::default(),
         }
     }
 }
@@ -69,7 +84,7 @@ pub struct VmwareConfig {
     pub default_stop_mode: String,
     #[serde(default = "default_scan_directories")]
     pub scan_directories: Vec<PathBuf>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vms: Vec<VmConfigEntry>,
 }
 
@@ -174,6 +189,170 @@ impl Default for SecurityConfig {
             require_kill_confirmation: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LicensingConfig {
+    /// Caminho explícito para o lmutil.exe (autodetecta SNL/PATH se vazio)
+    #[serde(default)]
+    pub lmutil_path: Option<String>,
+    /// Servidor padrão `porta@host` (ex: 25734@lic-server)
+    #[serde(default)]
+    pub default_server: Option<String>,
+    /// Alerta quando alguma feature ficar com menos livres que isso
+    #[serde(default = "default_min_free")]
+    pub min_free_threshold: u32,
+    /// Porta lmgrd padrão para diagnóstico
+    #[serde(default = "default_lm_port")]
+    pub lm_port: u16,
+    /// Porta do vendor daemon (sw_d), se fixa por firewall
+    #[serde(default)]
+    pub vendor_port: Option<u16>,
+}
+
+fn default_min_free() -> u32 {
+    2
+}
+
+fn default_lm_port() -> u16 {
+    25734
+}
+
+impl Default for LicensingConfig {
+    fn default() -> Self {
+        Self {
+            lmutil_path: None,
+            default_server: None,
+            min_free_threshold: default_min_free(),
+            lm_port: default_lm_port(),
+            vendor_port: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotesConfig {
+    /// Diretório das notas (padrão: ./notes). Suporta `~` e var. de ambiente.
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
+impl Default for NotesConfig {
+    fn default() -> Self {
+        Self {
+            dir: None,
+        }
+    }
+}
+
+impl NotesConfig {
+    /// Resolve o diretório de notas: config > ./notes
+    pub fn resolved_dir(&self) -> PathBuf {
+        if let Some(d) = &self.dir {
+            let expanded = shellexpand_tilde(d);
+            return PathBuf::from(expanded);
+        }
+        PathBuf::from("notes")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetdiagConfig {
+    /// Caminho explícito para o ntttcp.exe (Microsoft, externo)
+    #[serde(default)]
+    pub ntttcp_path: Option<String>,
+    /// Pacotes por série de ping
+    #[serde(default = "default_ping_count")]
+    pub ping_count: u32,
+    /// Timeout de port probe / sweep em ms
+    #[serde(default = "default_probe_timeout")]
+    pub probe_timeout_ms: u64,
+    /// Concorrência máxima da varredura de subnet
+    #[serde(default = "default_sweep_concurrency")]
+    pub sweep_concurrency: usize,
+}
+
+fn default_ping_count() -> u32 {
+    4
+}
+fn default_probe_timeout() -> u64 {
+    2000
+}
+fn default_sweep_concurrency() -> usize {
+    64
+}
+
+impl Default for NetdiagConfig {
+    fn default() -> Self {
+        Self {
+            ntttcp_path: None,
+            ping_count: default_ping_count(),
+            probe_timeout_ms: default_probe_timeout(),
+            sweep_concurrency: default_sweep_concurrency(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolidworksConfig {
+    /// Caminho do debug log do SNL para monitor de borrow (autodetecta se vazio)
+    #[serde(default)]
+    pub snl_log_path: Option<String>,
+    /// Caminhos extras de limpeza (além de swx*/sld*.tmp no %TEMP%)
+    #[serde(default)]
+    pub clean_extra_paths: Vec<String>,
+}
+
+impl Default for SolidworksConfig {
+    fn default() -> Self {
+        Self {
+            snl_log_path: None,
+            clean_extra_paths: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupportConfig {
+    /// Quantidade padrão do disk-top
+    #[serde(default = "default_disk_top_n")]
+    pub disk_top_n: usize,
+}
+
+fn default_disk_top_n() -> usize {
+    15
+}
+
+impl Default for SupportConfig {
+    fn default() -> Self {
+        Self {
+            disk_top_n: default_disk_top_n(),
+        }
+    }
+}
+
+/// Expansão mínima de `~` e `%VAR%` sem nova dependência.
+fn shellexpand_tilde(s: &str) -> String {    let mut out = s.to_string();
+    if out.starts_with('~') {
+        if let Some(home) = dirs::home_dir() {
+            out = format!("{}{}", home.to_string_lossy(), &out[1..]);
+        }
+    }
+    // Expande %VAR% estilo Windows
+    while let Some(start) = out.find('%') {
+        let rest = &out[start + 1..];
+        if let Some(end) = rest.find('%') {
+            let var = &rest[..end];
+            if let Ok(val) = std::env::var(var) {
+                out = format!("{}{}{}", &out[..start], val, &rest[end + 1..]);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    out
 }
 
 impl AppConfig {

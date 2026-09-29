@@ -1,4 +1,5 @@
-use super::app::{ActiveTab, AddVmField, App, InputMode, ModalState};
+use super::app::{ActiveTab, AddVmField, App, InputMode, LicRow, ModalState, ProcSort, SupportSection};
+use crate::modules::net::NetSort;
 use crate::modules::top::SortField;
 use crate::modules::vmware::VmStatus;
 use ratatui::{
@@ -30,6 +31,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ActiveTab::Vmware => draw_vmware_tab(f, chunks[1], app),
         ActiveTab::TopMetrics => draw_top_tab(f, chunks[1], app),
         ActiveTab::ProcessManager => draw_process_tab(f, chunks[1], app),
+        ActiveTab::Network => draw_network_tab(f, chunks[1], app),
+        ActiveTab::Licenses => draw_licenses_tab(f, chunks[1], app),
+        ActiveTab::Support => draw_support_tab(f, chunks[1], app),
     }
 
     draw_footer(f, chunks[2], app);
@@ -38,6 +42,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match &app.modal {
         ModalState::ConfirmKill { pids, has_critical } => {
             draw_confirm_kill_modal(f, size, pids, *has_critical);
+        }
+        ModalState::ConfirmLicFree { feature, user } => {
+            draw_confirm_licfree_modal(f, size, feature, &user.user, &user.host);
         }
         ModalState::CreateSnapshot { snapshot_name, .. } => {
             draw_snapshot_modal(f, size, snapshot_name);
@@ -60,9 +67,12 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 
     // 1. Linha superior: Abas de navegação
     let tab_titles = vec![
-        Span::styled(" [1] 🖥️  VMware Workstation ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled(" [2] 📊 TOP Recursos (RAM/GPU/IO/VRAM) ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled(" [3] 🎯 Gerenciador de Processos ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" [1] 🖥️  VMware ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" [2] 📊 TOP ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" [3] 🎯 Processos ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" [4] 🌐 Rede ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" [5] 🎫 Licenças ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" [6] 🧰 Suporte ", Style::default().add_modifier(Modifier::BOLD)),
     ];
 
     let selected_index = app.active_tab as usize;
@@ -353,17 +363,32 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
 
     f.render_widget(query_paragraph, chunks[0]);
 
-    // 2. Tabela de Processos
-    let header_cells = [
-        "SEL",
-        "STATUS",
-        "PID",
-        "NOME DO PROCESSO",
-        "CPU %",
-        "MEMÓRIA (MB)",
-    ]
-    .into_iter()
-    .map(|h| Span::styled(h, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+    // 2. Tabela de Processos (marca ▼ na coluna da ordenação ativa)
+    let proc_sort = app.proc_sort;
+
+    let proc_col_label = |name: &str, field: ProcSort| -> Span<'static> {
+        if proc_sort == field {
+            Span::styled(
+                format!("{} ▼", name),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            )
+        } else {
+            Span::styled(
+                name.to_string(),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )
+        }
+    };
+
+    let header_cells = vec![
+        Span::styled("SEL", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("STATUS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("PID", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        proc_col_label("NOME DO PROCESSO", ProcSort::Name),
+        proc_col_label("CPU %", ProcSort::Cpu),
+        proc_col_label("MEMÓRIA (MB)", ProcSort::Ram),
+        proc_col_label("VRAM (MB)", ProcSort::Vram),
+    ];
     let header_row = Row::new(header_cells).height(1).bottom_margin(1);
 
     let rows: Vec<Row> = app
@@ -385,6 +410,12 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
                 ("NORMAL", Style::default().fg(Color::Gray))
             };
 
+            let vram_style = if proc.vram_bytes > 500 * 1024 * 1024 {
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::LightMagenta)
+            };
+
             let cells = vec![
                 check,
                 Span::styled(status_text, status_style),
@@ -392,6 +423,7 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
                 Span::raw(&proc.name),
                 Span::styled(format!("{:.1}%", proc.cpu_pct), Style::default().fg(Color::White)),
                 Span::styled(format!("{:.1}", proc.memory_mb()), Style::default().fg(Color::LightCyan)),
+                Span::styled(format!("{:.1}", proc.vram_mb()), vram_style),
             ];
 
             let row_style = Style::default();
@@ -405,9 +437,10 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
         [
             Constraint::Length(6),
             Constraint::Length(14),
-            Constraint::Length(12),
-            Constraint::Min(30),
-            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Min(28),
+            Constraint::Length(10),
+            Constraint::Length(14),
             Constraint::Length(14),
         ],
     )
@@ -473,6 +506,648 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
+fn draw_network_tab(f: &mut Frame, area: Rect, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Search bar
+            Constraint::Length(3), // Filtros ativos
+            Constraint::Min(8),    // Tabela de sockets
+        ])
+        .split(area);
+
+    // 1. Barra de busca (porta, processo, endereço, estado)
+    let is_editing = app.input_mode == InputMode::SearchInput && app.active_tab == ActiveTab::Network;
+    let search_title = if is_editing {
+        " 🔍 Buscar Porta/Processo (Digitação Ativa - [ESC] para Concluir) "
+    } else {
+        " 🔍 Buscar Porta/Processo (Pressione [/] para Digitar | [Ctrl+C] para Limpar) "
+    };
+
+    let search_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(if is_editing {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Gray)
+        })
+        .title(search_title);
+
+    let display_query = if is_editing {
+        format!("{}█", app.net_query)
+    } else if app.net_query.is_empty() {
+        "<Digite porta, PID, nome do processo, endereço ou estado...>".to_string()
+    } else {
+        app.net_query.clone()
+    };
+
+    let query_paragraph = Paragraph::new(display_query)
+        .style(if app.net_query.is_empty() && !is_editing {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        })
+        .block(search_block);
+
+    f.render_widget(query_paragraph, chunks[0]);
+
+    // 2. Linha de filtros ativos
+    let filter_line = vec![Line::from(vec![
+        Span::styled("Protocolo: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("[{}] (tecla p alterna)", app.net_proto_filter.label()),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  |  "),
+        Span::styled("Escuta: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if app.only_listening { "SOMENTE LISTENING (l)" } else { "TODAS (l)" },
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  |  "),
+        Span::styled("Sockets: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw(format!("{}", app.filtered_net.len())),
+    ])];
+
+    let filter_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Gray))
+        .title(" Filtros ");
+
+    f.render_widget(Paragraph::new(filter_line).block(filter_block), chunks[1]);
+
+    // 3. Tabela de sockets (marca ▼ na coluna da ordenação ativa)
+    let net_sort = app.net_sort;
+
+    let net_col_label = |name: &str, field: NetSort| -> Span<'static> {
+        if net_sort == field {
+            Span::styled(
+                format!("{} ▼", name),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            )
+        } else {
+            Span::styled(
+                name.to_string(),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )
+        }
+    };
+
+    let header_cells = vec![
+        Span::styled("PROTO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        net_col_label("PORTA LOCAL", NetSort::Port),
+        Span::styled("ENDEREÇO LOCAL", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("REMOTO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        net_col_label("ESTADO", NetSort::State),
+        net_col_label("PID", NetSort::Pid),
+        net_col_label("PROCESSO", NetSort::Name),
+        Span::styled("STATUS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ];
+    let header_row = Row::new(header_cells).height(1).bottom_margin(1);
+
+    let rows: Vec<Row> = app
+        .filtered_net
+        .iter()
+        .map(|conn| {
+            let (status_text, status_style) = if conn.is_protected {
+                (
+                    "🛡️ CRÍTICO",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ("NORMAL", Style::default().fg(Color::Gray))
+            };
+
+            let state_style = match conn.state_label() {
+                "LISTENING" => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                "ESTABLISHED" => Style::default().fg(Color::Cyan),
+                "—" => Style::default().fg(Color::DarkGray),
+                _ => Style::default().fg(Color::Yellow),
+            };
+
+            let cells = vec![
+                Span::styled(conn.proto_label(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{}", conn.local_port), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(conn.local_ip.clone()),
+                Span::styled(conn.remote_endpoint(), Style::default().fg(Color::DarkGray)),
+                Span::styled(conn.state_label(), state_style),
+                Span::styled(format!("{}", conn.pid), Style::default().fg(Color::Cyan)),
+                Span::raw(conn.process_name.clone()),
+                Span::styled(status_text, status_style),
+            ];
+
+            Row::new(cells).style(Style::default())
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(7),
+            Constraint::Length(14),
+            Constraint::Min(18),
+            Constraint::Min(18),
+            Constraint::Length(14),
+            Constraint::Length(8),
+            Constraint::Min(22),
+            Constraint::Length(14),
+        ],
+    )
+    .header(header_row)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(format!(" Portas Ativas e Processos (Sockets: {}) ", app.filtered_net.len()))
+            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    )
+    .row_highlight_style(Style::default().bg(Color::Rgb(30, 45, 60)))
+    .highlight_symbol("▶ ");
+
+    f.render_stateful_widget(table, chunks[2], &mut app.net_table_state);
+}
+
+fn draw_licenses_tab(f: &mut Frame, area: Rect, app: &mut App) {
+    let has_diag = !app.lic_diag.is_empty();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // Status lmutil
+            Constraint::Min(8),     // Tabela features/checkouts
+            Constraint::Length(if has_diag { 8 } else { 3 }), // Diagnóstico
+        ])
+        .split(area);
+
+    // 1. Linha de status da fonte
+    let lmutil_txt = match &app.lic_lmutil {
+        Some(p) => format!("lmutil: {} | servidor: {} | [r] atualiza [Enter] expande [f] libera [d] diag",
+            p.display(),
+            app.config.licensing.default_server.as_deref().unwrap_or("(padrão)")),
+        None => "lmutil.exe NÃO ENCONTRADO — configure licensing.lmutil_path (funcionalidade limitada)".to_string(),
+    };
+    let status_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Gray))
+        .title(" Licenças FlexNet/SNL ");
+    f.render_widget(Paragraph::new(lmutil_txt).block(status_block), chunks[0]);
+
+    // 2. Tabela de features + checkouts
+    let header_cells = vec![
+        Span::styled("FEATURE / CHECKOUT", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("TOTAL", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("EM USO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("LIVRES", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("USO%", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ];
+    let header_row = Row::new(header_cells).height(1).bottom_margin(1);
+
+    let rows: Vec<Row> = app
+        .lic_rows
+        .iter()
+        .map(|row| match row {
+            LicRow::Feature { index, expanded } => {
+                let feat = &app.lic_features[*index];
+                let marker = if *expanded { "▾" } else { "▸" };
+                let use_style = if feat.use_pct() > 85.0 {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                } else if feat.use_pct() > 60.0 {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::Green)
+                };
+                let cells = vec![
+                    Span::styled(
+                        format!("{} {}", marker, feat.name),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("{}", feat.total_issued)),
+                    Span::raw(format!("{}", feat.total_used)),
+                    Span::styled(
+                        format!("{}", feat.free()),
+                        if feat.free() < app.config.licensing.min_free_threshold {
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::Gray)
+                        },
+                    ),
+                    Span::styled(format!("{:.0}%", feat.use_pct()), use_style),
+                ];
+                Row::new(cells).style(Style::default().bg(Color::Rgb(22, 30, 40)))
+            }
+            LicRow::User { user } => {
+                let cells = vec![
+                    Span::styled(
+                        format!("    {} @ {} (desde {})", user.user, user.host, user.checkout),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::raw(""),
+                    Span::raw(""),
+                    Span::raw(""),
+                    Span::raw(""),
+                ];
+                Row::new(cells)
+            }
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(30),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header_row)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(format!(" Features ({} linhas) ", app.lic_rows.len()))
+            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    )
+    .row_highlight_style(Style::default().bg(Color::Rgb(30, 45, 60)))
+    .highlight_symbol("▶ ");
+
+    f.render_stateful_widget(table, chunks[1], &mut app.lic_table_state);
+
+    // 3. Diagnóstico SNL (após tecla d)
+    if has_diag {
+        let lines: Vec<Line> = app
+            .lic_diag
+            .iter()
+            .map(|c| {
+                let mark = if c.ok { "✔" } else { "✖" };
+                let color = if c.ok { Color::Green } else { Color::Red };
+                Line::from(vec![
+                    Span::styled(format!("{} {}: ", mark, c.name), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Span::raw(c.detail.clone()),
+                ])
+            })
+            .collect();
+        let diag_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Diagnóstico SNL ");
+        f.render_widget(Paragraph::new(lines).block(diag_block), chunks[2]);
+    } else {
+        let hint = Paragraph::new("Pressione [d] para rodar o diagnóstico SNL (serviço, portas, registro, ping).")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded));
+        f.render_widget(hint, chunks[2]);
+    }
+}
+
+fn support_section_bar(app: &App) -> Vec<Span<'static>> {
+    let sections = [
+        SupportSection::Ping,
+        SupportSection::Lan,
+        SupportSection::Sw,
+        SupportSection::Disk,
+        SupportSection::Boot,
+        SupportSection::Notes,
+    ];
+    let mut spans = vec![Span::styled(
+        " Seção: ",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )];
+    for s in sections {
+        let active = s == app.support_section;
+        spans.push(Span::styled(
+            format!(" [{}]{} ", if active { "●" } else { "○" }, s.label()),
+            if active {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ));
+    }
+    spans.push(Span::styled(
+        "  ([ ] alterna)",
+        Style::default().fg(Color::DarkGray),
+    ));
+    spans
+}
+
+fn sparkline(values: &[u32]) -> String {
+    const BARS: [char; 8] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'];
+    if values.is_empty() {
+        return "<sem medições — pressione [r]>".to_string();
+    }
+    let max = (*values.iter().max().unwrap()).max(1);
+    values
+        .iter()
+        .map(|v| BARS[((*v as usize * 7) / max as usize).min(7)])
+        .collect()
+}
+
+fn draw_support_tab(f: &mut Frame, area: Rect, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Seletor de seção
+            Constraint::Min(8),    // Conteúdo
+            Constraint::Length(5), // Detalhe / ajuda contextual
+        ])
+        .split(area);
+
+    // 1. Seletor de seção
+    let bar_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Gray))
+        .title(" Suporte Técnico ");
+    f.render_widget(
+        Paragraph::new(Line::from(support_section_bar(app))).block(bar_block),
+        chunks[0],
+    );
+
+    // 2. Conteúdo da seção
+    match app.support_section {
+        SupportSection::Ping => draw_support_ping(f, chunks[1], app),
+        SupportSection::Lan => draw_support_lan(f, chunks[1], app),
+        SupportSection::Sw => draw_support_sw(f, chunks[1], app),
+        SupportSection::Disk => draw_support_disk(f, chunks[1], app),
+        SupportSection::Boot => draw_support_boot(f, chunks[1], app),
+        SupportSection::Notes => draw_support_notes(f, chunks[1], app),
+    }
+
+    // 3. Ajuda contextual
+    let help = match app.support_section {
+        SupportSection::Ping => "[/] edita host | [r/Enter] roda série | [e] exporta CSV de evidência",
+        SupportSection::Lan => "[r] revarre tabela ARP da LAN",
+        SupportSection::Sw => "[r] recarrega inventário SW + GPUs",
+        SupportSection::Disk => "[/] edita caminho | [r/Enter] calcula top pastas (pode demorar)",
+        SupportSection::Boot => "[r] recarrega Run keys + tarefas agendadas",
+        SupportSection::Notes => "[/] busca | [v/Enter] lê nota | criação e edição pelo CLI `notes`",
+    };
+    let help_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray));
+    f.render_widget(Paragraph::new(help).style(Style::default().fg(Color::Gray)).block(help_block), chunks[2]);
+}
+
+fn draw_support_ping(f: &mut Frame, area: Rect, app: &mut App) {
+    let is_editing = app.input_mode == InputMode::SearchInput;
+    let host_line = Line::from(vec![
+        Span::styled("Host: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if is_editing { format!("{}█", app.ping_host) } else { app.ping_host.clone() },
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    let stats_line = match &app.ping_stats {
+        Some(s) => Line::from(vec![
+            Span::styled("Última série: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(s.summary()),
+        ]),
+        None => Line::from(Span::styled(
+            "Nenhuma medição ainda.",
+            Style::default().fg(Color::DarkGray),
+        )),
+    };
+    let spark_line = Line::from(vec![
+        Span::styled("Histórico (avg ms): ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(sparkline(&app.ping_history), Style::default().fg(Color::Cyan)),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Latência / Ping ")
+        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    f.render_widget(Paragraph::new(vec![host_line, Line::from(""), stats_line, spark_line]).block(block), area);
+}
+
+fn draw_support_lan(f: &mut Frame, area: Rect, app: &mut App) {
+    let header = Row::new(vec![
+        Span::styled("IP", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("MAC", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("TIPO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ])
+    .height(1)
+    .bottom_margin(1);
+    let rows: Vec<Row> = app
+        .arp_entries
+        .iter()
+        .map(|e| {
+            Row::new(vec![
+                Span::styled(e.ip.clone(), Style::default().fg(Color::Cyan)),
+                Span::raw(e.mac.clone()),
+                Span::raw(crate::modules::support::arp_type_label(e.entry_type).to_string()),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [Constraint::Length(20), Constraint::Length(22), Constraint::Min(10)],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(format!(" Mapa da LAN — ARP ({} hosts) ", app.arp_entries.len()))
+            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    )
+    .row_highlight_style(Style::default().bg(Color::Rgb(30, 45, 60)))
+    .highlight_symbol("▶ ");
+    f.render_stateful_widget(table, area, &mut app.support_table_state);
+}
+
+fn draw_support_sw(f: &mut Frame, area: Rect, app: &mut App) {
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Instalações SolidWorks:",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
+    if app.sw_installs.is_empty() {
+        lines.push(Line::from("  <pressione [r] para carregar>"));
+    }
+    for inst in &app.sw_installs {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} — {} ({})", inst.version_key, inst.install_dir, inst.install_date),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        ]));
+        for (prod, sn) in &inst.serials {
+            lines.push(Line::from(format!("    {:<22} {}", prod, sn)));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "GPUs:",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
+    for gpu in &app.sw_gpus {
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {} | driver {} | {} MB — ", gpu.name, gpu.driver_version, gpu.ram_mb)),
+            Span::styled(
+                crate::modules::support::certified_status(&gpu.name).to_string(),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" SolidWorks ")
+        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_support_disk(f: &mut Frame, area: Rect, app: &mut App) {
+    let is_editing = app.input_mode == InputMode::SearchInput;
+    let path_line = format!(
+        "Caminho: {}   ([/] edita, [r] calcula)",
+        if is_editing { format!("{}█", app.disk_path) } else { app.disk_path.clone() }
+    );
+    let header = Row::new(vec![
+        Span::styled("TAMANHO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("PASTA", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ])
+    .height(1)
+    .bottom_margin(1);
+    let rows: Vec<Row> = app
+        .disk_entries
+        .iter()
+        .map(|e| {
+            Row::new(vec![
+                Span::styled(
+                    crate::modules::support::bytes_to_human(e.bytes),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(e.path.display().to_string()),
+            ])
+        })
+        .collect();
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(4)])
+        .split(area);
+    let path_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Gray));
+    f.render_widget(
+        Paragraph::new(path_line).style(Style::default().fg(Color::White)).block(path_block),
+        inner[0],
+    );
+    let table = Table::new(rows, [Constraint::Length(14), Constraint::Min(30)])
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(" Disco — Top Pastas ")
+                .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        )
+        .row_highlight_style(Style::default().bg(Color::Rgb(30, 45, 60)))
+        .highlight_symbol("▶ ");
+    f.render_stateful_widget(table, inner[1], &mut app.support_table_state);
+}
+
+fn draw_support_boot(f: &mut Frame, area: Rect, app: &mut App) {
+    let header = Row::new(vec![
+        Span::styled("ORIGEM", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("NOME", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("COMANDO / STATUS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ])
+    .height(1)
+    .bottom_margin(1);
+    let rows: Vec<Row> = app
+        .boot_items
+        .iter()
+        .map(|b| {
+            Row::new(vec![
+                Span::styled(b.source.clone(), Style::default().fg(Color::Magenta)),
+                Span::styled(b.name.clone(), Style::default().fg(Color::Cyan)),
+                Span::raw(b.command.clone()),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [Constraint::Length(16), Constraint::Length(34), Constraint::Min(30)],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(format!(" Boot / Login ({} itens) ", app.boot_items.len()))
+            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    )
+    .row_highlight_style(Style::default().bg(Color::Rgb(30, 45, 60)))
+    .highlight_symbol("▶ ");
+    f.render_stateful_widget(table, area, &mut app.support_table_state);
+}
+
+fn draw_support_notes(f: &mut Frame, area: Rect, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(4), Constraint::Length(7)])
+        .split(area);
+
+    let is_editing = app.input_mode == InputMode::SearchInput;
+    let header = Row::new(vec![
+        Span::styled(
+            format!(
+                "ID {}",
+                if is_editing {
+                    format!("(busca: {}█)", app.note_query)
+                } else if app.note_query.is_empty() {
+                    "([/] busca)".to_string()
+                } else {
+                    format!("(filtro: {})", app.note_query)
+                }
+            ),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("TÍTULO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("TAGS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ])
+    .height(1)
+    .bottom_margin(1);
+    let rows: Vec<Row> = app
+        .support_notes
+        .iter()
+        .map(|n| {
+            Row::new(vec![
+                Span::styled(n.id.clone(), Style::default().fg(Color::Cyan)),
+                Span::raw(n.title.clone()),
+                Span::styled(n.tags.join(","), Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [Constraint::Length(30), Constraint::Min(24), Constraint::Length(20)],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(format!(" Notas de Campo ({} — [v] lê) ", app.support_notes.len()))
+            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    )
+    .row_highlight_style(Style::default().bg(Color::Rgb(30, 45, 60)))
+    .highlight_symbol("▶ ");
+    f.render_stateful_widget(table, chunks[0], &mut app.support_table_state);
+
+    let body = app.note_body.as_deref().unwrap_or("Selecione uma nota e pressione [v] para ler. Criação pelo CLI: `notes add \"título\" --body ...`.");
+    let detail = Paragraph::new(body)
+        .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title(" Leitura "))
+        .style(Style::default().fg(Color::White));
+    f.render_widget(detail, chunks[1]);
+}
+
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -496,10 +1171,19 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             "[>] Iniciar | [x] Parar | [p] Pausar | [u] Retomar | [z] Suspender | [n] Snapshot | [a] Cadastrar | [r] Atualizar | [Tab] Alternar Aba | [?] Ajuda | [q] Sair"
         }
         ActiveTab::TopMetrics => {
-            "[c] Ord. CPU | [m] RAM | [d] Disco | [g] GPU | [v] VRAM | [Tab] Alternar Aba | [?] Ajuda | [q] Sair"
+            "[c] Ord. CPU | [m] RAM | [d] Disco | [g] GPU | [v] VRAM | [Enter] Gerenciar processo | [Tab] Alternar Aba | [?] Ajuda | [q] Sair"
         }
         ActiveTab::ProcessManager => {
             "[/] Buscar | [Espaço] Selecionar | [k/Enter] Matar | [n] Ord. Nome | [C] CPU | [M] Mem | [V] VRAM | [e] CSV | [E] JSON | [Tab] Aba | [?] Ajuda | [q] Sair"
+        }
+        ActiveTab::Network => {
+            "[/] Buscar | [p] Proto | [l] Listening | [o/n/d/s] Ordenar | [r] Atualizar | [k/Enter] Matar | [e] CSV | [E] JSON | [Tab] Aba | [?] Ajuda | [q] Sair"
+        }
+        ActiveTab::Licenses => {
+            "[r] Atualizar lmstat | [Enter] Expandir feature | [f] Liberar checkout | [d] Diagnóstico SNL | [Tab] Aba | [?] Ajuda | [q] Sair"
+        }
+        ActiveTab::Support => {
+            "[[ ]] Trocar seção | [r/Enter] Executar | [/] Editar campo | [v] Ler nota | [e] Exportar ping | [Tab] Aba | [?] Ajuda | [q] Sair"
         }
     };
 
@@ -557,6 +1241,44 @@ fn draw_confirm_kill_modal(f: &mut Frame, area: Rect, pids: &[u32], has_critical
         .border_type(BorderType::Double)
         .border_style(Style::default().fg(border_color))
         .title(" CONFIRMAÇÃO DE FINALIZAÇÃO (TASKKILL) ")
+        .title_alignment(Alignment::Center);
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .alignment(Alignment::Center);
+
+    f.render_widget(paragraph, modal_area);
+}
+
+fn draw_confirm_licfree_modal(f: &mut Frame, area: Rect, feature: &str, user: &str, host: &str) {
+    let modal_area = centered_rect(60, 35, area);
+    f.render_widget(Clear, modal_area);
+
+    let text = vec![
+        Line::from(vec![
+            Span::styled(
+                "Liberar checkout de licença FlexNet?",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(format!("Feature: {}", feature)),
+        Line::from(format!("Usuário: {} @ {}", user, host)),
+        Line::from(""),
+        Line::from("O usuário perderá a licença (salve o trabalho dele antes, se possível)."),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" [Y / Enter] SIM, LIBERAR ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw("    "),
+            Span::styled(" [N / ESC] CANCELAR ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        ]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" LIBERAR LICENÇA (LMREMOVE) ")
         .title_alignment(Alignment::Center);
 
     let paragraph = Paragraph::new(text)
@@ -652,7 +1374,7 @@ fn draw_help_modal(f: &mut Frame, area: Rect) {
         Line::from(Span::styled("GUIA RÁPIDO DE TECLAS E ATALHOS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from(Span::styled("Navegação Global:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
-        Line::from("  1, 2, 3       - Alternar diretamente entre abas"),
+        Line::from("  1..6         - Alternar diretamente entre abas"),
         Line::from("  Tab / Shift+Tab - Percorrer abas (Próxima / Anterior)"),
         Line::from("  Setas / j, k  - Navegar verticalmente nas listas de itens"),
         Line::from("  PgUp / PgDown - Rolar listas rapidamente"),
@@ -671,6 +1393,7 @@ fn draw_help_modal(f: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled("Aba 2: TOP Recursos do Sistema:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
         Line::from("  c, m, d, g, v - Ordenar por CPU%, RAM, Disco I/O, GPU% ou VRAM"),
+        Line::from("  Enter         - Levar processo selecionado p/ Gerenciador (aba 3) já filtrado"),
         Line::from(""),
         Line::from(Span::styled("Aba 3: Gerenciador de Processos:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
         Line::from("  /             - Entrar no modo de busca e digitação"),
@@ -683,6 +1406,30 @@ fn draw_help_modal(f: &mut Frame, area: Rect) {
         Line::from("  V             - Ordenar por VRAM (maior primeiro)"),
         Line::from("  e             - Exportar lista filtrada para CSV"),
         Line::from("  E             - Exportar lista filtrada para JSON"),
+        Line::from(""),
+        Line::from(Span::styled("Aba 4: Rede/Portas:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from("  /             - Entrar no modo de busca (porta, PID, processo, estado)"),
+        Line::from("  p             - Alternar filtro de protocolo (TCP+UDP / TCP / UDP)"),
+        Line::from("  l             - Alternar somente sockets em escuta"),
+        Line::from("  o, n, d, s   - Ordenar por porta, processo, PID ou estado"),
+        Line::from("  r             - Revarrer portas agora"),
+        Line::from("  k / Delete    - Abrir confirmação para finalizar o processo dono da porta"),
+        Line::from("  Ctrl+C        - Limpar texto da busca"),
+        Line::from("  e             - Exportar lista filtrada para CSV"),
+        Line::from("  E             - Exportar lista filtrada para JSON"),
+        Line::from(""),
+        Line::from(Span::styled("Aba 5: Licenças FlexNet/SNL:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from("  r             - Atualizar consulta lmstat"),
+        Line::from("  Enter / Espaço- Expandir / recolher checkouts da feature"),
+        Line::from("  f / Delete    - Liberar checkout selecionado (com confirmação)"),
+        Line::from("  d             - Rodar diagnóstico SNL (serviço, portas, registro, ping)"),
+        Line::from(""),
+        Line::from(Span::styled("Aba 6: Suporte Técnico:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from("  [ / ]         - Alternar seção (Ping, LAN, SW, Disco, Boot, Notas)"),
+        Line::from("  r / Enter     - Executar ação da seção"),
+        Line::from("  /             - Editar host do ping, caminho do disco ou busca de notas"),
+        Line::from("  v             - Ler nota selecionada"),
+        Line::from("  e             - Exportar evidência de ping (CSV, seção Latência)"),
         Line::from(""),
         Line::from(Span::styled("Pressione [ESC] ou [Enter] para fechar", Style::default().fg(Color::Green))),
     ];

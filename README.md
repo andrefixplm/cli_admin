@@ -59,6 +59,7 @@ A aplicação opera em dois modos distintos:
 - `d`: Ordenar processos por **Disco I/O**
 - `g`: Ordenar processos por **GPU Engine %**
 - `v`: Ordenar processos por **VRAM (MB)**
+- `Enter`: Levar o processo selecionado para o **Gerenciador de Processos (aba 3)** já filtrado pelo nome
 
 ### Aba 3: 🎯 Gerenciador de Processos (Process Killer)
 - `/`: Entrar no modo de busca por digitação (filtro fuzzy instantâneo)
