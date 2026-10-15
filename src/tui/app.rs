@@ -1,5 +1,7 @@
 use crate::config::{AppConfig, VmConfigEntry};
-use crate::modules::process::{ProcessFilter, ProcessItem, ProcessKiller, ProcessShield};
+use crate::modules::process::{
+    export_processes, ProcessFilter, ProcessItem, ProcessKiller, ProcessShield,
+};
 use crate::modules::top::{
     GpuPdhCollector, NvidiaCollector, NvidiaGpuInfo, ProcessResourceInfo, SortField,
     SystemMetricsManager, SystemResourceOverview,
@@ -252,6 +254,7 @@ impl App {
                 is_protected,
                 selected,
                 exe_path: proc.exe_path.clone(),
+                cmd_line: proc.cmd_line.clone(),
                 user: proc.user.clone(),
                 start_time: proc.start_time,
                 threads: proc.threads,
@@ -732,38 +735,8 @@ impl App {
 
     /// Exporta a lista de processos filtrados para um arquivo JSON ou CSV
     pub fn export_processes(&self, format: &str) -> Result<String, String> {
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let filename = format!("processes_{}.{}", timestamp, format);
-
-        let content = match format {
-            "json" => {
-                serde_json::to_string_pretty(&self.filtered_processes)
-                    .map_err(|e| format!("Erro ao serializar JSON: {}", e))?
-            }
-            "csv" => {
-                let mut csv = String::from("PID,Nome,CPU%,Memoria_MB,Path,Usuario,Uptime,Protegido\n");
-                for proc in &self.filtered_processes {
-                    csv.push_str(&format!(
-                        "{},{},{:.1},{:.1},{},{},{},{}\n",
-                        proc.pid,
-                        proc.name.replace(',', ";"),
-                        proc.cpu_pct,
-                        proc.memory_mb(),
-                        proc.exe_path.replace(',', ";"),
-                        proc.user.replace(',', ";"),
-                        proc.formatted_uptime(),
-                        if proc.is_protected { "SIM" } else { "NAO" }
-                    ));
-                }
-                csv
-            }
-            _ => return Err(format!("Formato '{}' não suportado. Use 'json' ou 'csv'.", format)),
-        };
-
-        std::fs::write(&filename, &content)
-            .map_err(|e| format!("Erro ao escrever arquivo: {}", e))?;
-
-        Ok(filename)
+        export_processes(&self.filtered_processes, format, None)
+            .map(|path| path.display().to_string())
     }
 
     fn trigger_kill_modal(&mut self) {

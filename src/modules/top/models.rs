@@ -50,6 +50,9 @@ pub struct ProcessResourceInfo {
     pub vram_bytes: u64,
     #[serde(default)]
     pub exe_path: String,
+    /// Linha de comando completa (equivalente à coluna do Gerenciador de Tarefas)
+    #[serde(default)]
+    pub cmd_line: String,
     #[serde(default)]
     pub user: String,
     #[serde(default)]

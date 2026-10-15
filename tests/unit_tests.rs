@@ -1,4 +1,5 @@
 use cli_admin::config::AppConfig;
+use cli_admin::modules::process::export::to_csv;
 use cli_admin::modules::process::{ProcessFilter, ProcessItem, ProcessShield};
 use cli_admin::modules::top::{ProcessResourceInfo, SystemResourceOverview};
 use cli_admin::modules::vmware::{StartMode, StopMode, VmStatus};
@@ -42,6 +43,7 @@ fn test_process_filter() {
             is_protected: false,
             selected: false,
             exe_path: String::new(),
+            cmd_line: String::new(),
             user: String::new(),
             start_time: 0,
             threads: 0,
@@ -59,6 +61,7 @@ fn test_process_filter() {
             is_protected: false,
             selected: false,
             exe_path: String::new(),
+            cmd_line: String::new(),
             user: String::new(),
             start_time: 0,
             threads: 0,
@@ -76,6 +79,7 @@ fn test_process_filter() {
             is_protected: false,
             selected: false,
             exe_path: String::new(),
+            cmd_line: String::new(),
             user: String::new(),
             start_time: 0,
             threads: 0,
@@ -114,6 +118,7 @@ fn test_top_models() {
         gpu_pct: 10.0,
         vram_bytes: 1024 * 1024 * 80, // 80 MB
         exe_path: String::new(),
+        cmd_line: String::new(),
         user: String::new(),
         start_time: 0,
         threads: 0,
@@ -152,4 +157,39 @@ fn test_vm_models() {
     assert_eq!(VmStatus::Stopped.to_string(), "STOPPED");
     assert_eq!(VmStatus::Paused.to_string(), "PAUSED");
     assert_eq!(VmStatus::Offline.to_string(), "OFFLINE");
+}
+
+#[test]
+fn test_export_csv_cmd_line() {
+    let procs = vec![ProcessItem {
+        pid: 4242,
+        name: "SLDWORKS.exe".to_string(),
+        cpu_pct: 3.0,
+        memory_bytes: 1024 * 1024 * 100,
+        is_protected: false,
+        selected: false,
+        exe_path: r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe".to_string(),
+        cmd_line: r#""C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe" /r "C:\PDM\a,b.sldprt""#
+            .to_string(),
+        user: String::new(),
+        start_time: 0,
+        threads: 0,
+        parent_pid: Some(1000),
+        gpu_pct: 0.0,
+        vram_bytes: 0,
+        disk_read_bytes_sec: 0,
+        disk_write_bytes_sec: 0,
+    }];
+
+    let csv = to_csv(&procs);
+    // BOM UTF-8 para o Excel abrir acentos corretamente
+    assert!(csv.starts_with('\u{FEFF}'));
+    let mut lines = csv.lines();
+    assert!(lines.next().unwrap().contains("Linha_de_Comando"));
+    let row = lines.next().unwrap();
+    assert!(row.starts_with("4242,1000,SLDWORKS.exe,"));
+    // Aspas duplicadas e campo citado por conter vírgula (RFC 4180)
+    assert!(row.contains(
+        r#","""C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe"" /r ""C:\PDM\a,b.sldprt""","#
+    ));
 }

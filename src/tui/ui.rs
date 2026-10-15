@@ -6,7 +6,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Clear, Gauge, Paragraph, Row, Table, Tabs,
+        Block, BorderType, Borders, Clear, Gauge, Paragraph, Row, Table, Tabs, Wrap,
     },
     Frame,
 };
@@ -307,7 +307,7 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
             .constraints([
                 Constraint::Length(3),  // Search bar
                 Constraint::Min(8),     // Process table
-                Constraint::Length(6),  // Details panel
+                Constraint::Length(8),  // Details panel
             ])
             .split(area)
     } else {
@@ -436,6 +436,10 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
                     Span::raw(if proc.exe_path.is_empty() { "<não disponível>" } else { &proc.exe_path }),
                 ]),
                 Line::from(vec![
+                    Span::styled("Cmd: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(if proc.cmd_line.is_empty() { "<não disponível>" } else { &proc.cmd_line }),
+                ]),
+                Line::from(vec![
                     Span::styled("Usuário: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                     Span::raw(if proc.user.is_empty() { "<não disponível>" } else { &proc.user }),
                     Span::raw("  |  "),
@@ -464,8 +468,10 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
                 .title(" Detalhes do Processo Selecionado ")
                 .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
 
+            // Wrap: a linha de comando costuma ser longa (quebra em até 3 linhas no painel)
             let details = Paragraph::new(details_text)
                 .block(details_block)
+                .wrap(Wrap { trim: false })
                 .style(Style::default().fg(Color::White));
 
             f.render_widget(details, chunks[2]);
@@ -683,6 +689,7 @@ fn draw_help_modal(f: &mut Frame, area: Rect) {
         Line::from("  V             - Ordenar por VRAM (maior primeiro)"),
         Line::from("  e             - Exportar lista filtrada para CSV"),
         Line::from("  E             - Exportar lista filtrada para JSON"),
+        Line::from("                  (relatórios incluem a linha de comando de cada processo)"),
         Line::from(""),
         Line::from(Span::styled("Pressione [ESC] ou [Enter] para fechar", Style::default().fg(Color::Green))),
     ];

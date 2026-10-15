@@ -1,6 +1,8 @@
 use cli_admin::config::{AppConfig, VmConfigEntry};
 use cli_admin::logger;
-use cli_admin::modules::process::{ProcessFilter, ProcessItem, ProcessKiller, ProcessShield};
+use cli_admin::modules::process::{
+    export_processes, ProcessFilter, ProcessItem, ProcessKiller, ProcessShield,
+};
 use cli_admin::modules::top::{
     GpuPdhCollector, NvidiaCollector, SortField, SystemMetricsManager,
 };
@@ -46,6 +48,9 @@ enum Commands {
 
     /// Pesquisa e finaliza processos (taskkill facilitado)
     Kill(KillArgs),
+
+    /// Exporta relatório de processos (com linha de comando) em CSV ou JSON
+    Export(ExportArgs),
 }
 
 #[derive(Args, Debug)]
@@ -179,6 +184,20 @@ struct KillArgs {
     dry_run: bool,
 }
 
+#[derive(Args, Debug)]
+struct ExportArgs {
+    /// Filtro opcional (nome do processo ou PID, busca fuzzy)
+    query: Option<String>,
+
+    /// Formato do relatório: csv ou json
+    #[arg(short, long, default_value = "csv")]
+    format: String,
+
+    /// Arquivo de saída (padrão: processes_<timestamp>.<formato> no diretório atual)
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -206,6 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Commands::Vm(args) => handle_vm_cli(config, &config_path, args).await?,
             Commands::Top(args) => handle_top_cli(config, args).await?,
             Commands::Kill(args) => handle_kill_cli(config, args).await?,
+            Commands::Export(args) => handle_export_cli(config, args).await?,
         },
     }
 
@@ -450,6 +470,7 @@ async fn handle_kill_cli(
                 is_protected,
                 selected: false,
                 exe_path: p.exe_path,
+                cmd_line: p.cmd_line,
                 user: p.user,
                 start_time: p.start_time,
                 threads: p.threads,
@@ -519,6 +540,68 @@ async fn handle_kill_cli(
             Ok(msg) => println!("✔ PID {}: {}", pid, msg),
             Err(err) => eprintln!("✖ PID {}: Erro: {}", pid, err),
         }
+    }
+
+    Ok(())
+}
+
+async fn handle_export_cli(
+    config: AppConfig,
+    args: ExportArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let format = args.format.to_lowercase();
+    if format != "csv" && format != "json" {
+        return Err(format!("Formato '{}' não suportado. Use 'csv' ou 'json'.", args.format).into());
+    }
+
+    let mut system_manager = SystemMetricsManager::new();
+    // Janela breve para o cálculo de delta de CPU (mesma abordagem do subcomando top)
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    system_manager.refresh();
+
+    let shield = ProcessShield::new(&config.security.protected_processes);
+    let filter = ProcessFilter::new();
+
+    let dummy_gpu = std::collections::HashMap::new();
+    let mut items: Vec<ProcessItem> = system_manager
+        .get_all_processes(&dummy_gpu)
+        .into_iter()
+        .map(|p| {
+            let is_protected = shield.is_protected(&p.name, p.pid);
+            ProcessItem {
+                pid: p.pid,
+                name: p.name,
+                cpu_pct: p.cpu_pct,
+                memory_bytes: p.memory_bytes,
+                is_protected,
+                selected: false,
+                exe_path: p.exe_path,
+                cmd_line: p.cmd_line,
+                user: p.user,
+                start_time: p.start_time,
+                threads: p.threads,
+                parent_pid: p.parent_pid,
+                gpu_pct: p.gpu_pct,
+                vram_bytes: p.vram_bytes,
+                disk_read_bytes_sec: p.disk_read_bytes_sec,
+                disk_write_bytes_sec: p.disk_write_bytes_sec,
+            }
+        })
+        .collect();
+    items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    let query = args.query.unwrap_or_default();
+    let selected: Vec<ProcessItem> = filter.filter(&query, &items).into_iter().cloned().collect();
+
+    let path = export_processes(&selected, &format, args.output.as_deref())?;
+    let without_cmd = selected.iter().filter(|p| p.cmd_line.is_empty()).count();
+
+    println!("✔ Relatório com {} processo(s) exportado para: {}", selected.len(), path.display());
+    if without_cmd > 0 {
+        println!(
+            "  Aviso: {} processo(s) sem linha de comando (acesso negado — execute como Administrador para processos de sistema/outros usuários).",
+            without_cmd
+        );
     }
 
     Ok(())
