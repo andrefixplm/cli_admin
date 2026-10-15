@@ -150,7 +150,7 @@ cli_admin export
 # Apenas processos do SOLIDWORKS, em JSON, com arquivo de saída definido
 cli_admin export sldworks --format json --output C:\Temp\sldworks.json
 ```
-Colunas do CSV: `PID, PPID, Nome, CPU%, Memoria_MB, Path, Linha_de_Comando, Usuario, Uptime, Protegido`.
+Colunas do CSV: `PID, PPID, Nome, CPU%, Memoria_MB, Path, Linha_de_Comando, Usuario, Uptime, Protegido`. O arquivo é gravado em UTF-8 com BOM, para que o Excel exiba acentos corretamente.
 
 > **Observação:** assim como no Gerenciador de Tarefas, a linha de comando de processos de sistema ou de outros usuários só é lida quando o `cli_admin` é executado **como Administrador**; caso contrário, o campo fica vazio e o comando informa quantos processos ficaram sem essa informação.
 

@@ -182,6 +182,8 @@ fn test_export_csv_cmd_line() {
     }];
 
     let csv = to_csv(&procs);
+    // BOM UTF-8 para o Excel abrir acentos corretamente
+    assert!(csv.starts_with('\u{FEFF}'));
     let mut lines = csv.lines();
     assert!(lines.next().unwrap().contains("Linha_de_Comando"));
     let row = lines.next().unwrap();

@@ -28,10 +28,11 @@ pub fn export_processes(
     Ok(path)
 }
 
-/// Gera o relatório CSV (RFC 4180: campos com vírgula, aspas ou quebra de linha são citados)
+/// Gera o relatório CSV (RFC 4180: campos com vírgula, aspas ou quebra de linha são citados).
+/// Inicia com BOM UTF-8 para o Excel reconhecer acentos (ex.: caminhos em "Configurações").
 pub fn to_csv(items: &[ProcessItem]) -> String {
     let mut csv = String::from(
-        "PID,PPID,Nome,CPU%,Memoria_MB,Path,Linha_de_Comando,Usuario,Uptime,Protegido\n",
+        "\u{FEFF}PID,PPID,Nome,CPU%,Memoria_MB,Path,Linha_de_Comando,Usuario,Uptime,Protegido\n",
     );
     for proc in items {
         csv.push_str(&format!(
