@@ -28,6 +28,9 @@ A aplicação opera em dois modos distintos:
 
    # Buscar processos correspondentes e simular finalização
    cli_admin kill chrome --dry-run
+
+   # Exportar relatório de processos com a linha de comando de cada um
+   cli_admin export sldworks -o relatorio.csv
    ```
 
 ---
@@ -73,7 +76,7 @@ A aplicação opera em dois modos distintos:
 - `e`: Exportar lista filtrada para **CSV** (arquivo com timestamp)
 - `E`: Exportar lista filtrada para **JSON** (arquivo com timestamp)
 - **Escudo de Proteção:** Processos vitais do Windows (`csrss.exe`, `svchost.exe`, `winlogon.exe`, etc.) são identificados com `🛡️ CRÍTICO` e disparam alertas visuais em vermelho para evitar telas azuis acidentais.
-- **Painel de Detalhes:** Ao selecionar um processo, um painel inferior exibe informações detalhadas: path completo, usuário, tempo de execução (uptime), PID pai, uso de GPU/VRAM e disco I/O.
+- **Painel de Detalhes:** Ao selecionar um processo, um painel inferior exibe informações detalhadas: path completo, **linha de comando** (a mesma coluna do Gerenciador de Tarefas), usuário, tempo de execução (uptime), PID pai, uso de GPU/VRAM e disco I/O.
 
 ---
 
@@ -137,6 +140,19 @@ cli_admin kill notepad
 # Forçar finalização imediata com árvore de filhos sem prompt
 cli_admin kill "my_app.exe" --force --tree -y
 ```
+
+### 4. Relatório de Processos (`cli_admin export`)
+Exporta a lista de processos — incluindo a **linha de comando** que iniciou cada um — em CSV ou JSON. O filtro é opcional e usa a mesma busca fuzzy (nome ou PID) da TUI.
+```bash
+# Todos os processos em CSV (processes_<timestamp>.csv no diretório atual)
+cli_admin export
+
+# Apenas processos do SOLIDWORKS, em JSON, com arquivo de saída definido
+cli_admin export sldworks --format json --output C:\Temp\sldworks.json
+```
+Colunas do CSV: `PID, PPID, Nome, CPU%, Memoria_MB, Path, Linha_de_Comando, Usuario, Uptime, Protegido`.
+
+> **Observação:** assim como no Gerenciador de Tarefas, a linha de comando de processos de sistema ou de outros usuários só é lida quando o `cli_admin` é executado **como Administrador**; caso contrário, o campo fica vazio e o comando informa quantos processos ficaram sem essa informação.
 
 ---
 

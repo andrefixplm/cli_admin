@@ -132,6 +132,7 @@ impl SystemMetricsManager {
                 let exe_path = proc.exe()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
+                let cmd_line = join_cmd_line(proc.cmd());
                 let user = proc.user_id().map(|u| u.to_string()).unwrap_or_default();
                 let start_time = proc.start_time();
                 let parent_pid = proc.parent().map(|p| p.as_u32());
@@ -146,6 +147,7 @@ impl SystemMetricsManager {
                     gpu_pct,
                     vram_bytes,
                     exe_path,
+                    cmd_line,
                     user,
                     start_time,
                     threads: 0,
@@ -154,4 +156,20 @@ impl SystemMetricsManager {
             })
             .collect()
     }
+}
+
+/// Remonta a linha de comando a partir dos argumentos já separados pelo sysinfo,
+/// citando argumentos com espaços (ex.: caminhos em "C:\\Program Files")
+fn join_cmd_line(args: &[std::ffi::OsString]) -> String {
+    args.iter()
+        .map(|a| {
+            let s = a.to_string_lossy();
+            if s.is_empty() || s.contains(' ') || s.contains('\t') {
+                format!("\"{}\"", s)
+            } else {
+                s.into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
