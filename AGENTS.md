@@ -42,3 +42,13 @@ Não enfraquecer. Conjunto case-insensitive = `security.protected_processes` + l
 - Código e comentários em **português (pt-BR)** — manter ao editar.
 - `Cargo.toml` usa edition 2024; dependências agrupadas por finalidade com comentários de seção.
 - O que não pode ser testado de forma determinística (subprocessos, APIs do Windows) fica deliberadamente fora da suíte de testes — lógica pura vai para `tests/unit_tests.rs`.
+
+## Versão 3 (`cli_admin_v3`)
+
+- Executável: `cli_admin_v3.exe` (pacote e biblioteca continuam `cli_admin`).
+- Linha de comando completa visível na aba Processos e na exportação. Depende de permissão do Windows para processos de outros usuários e do sistema.
+- Encerramento: processo protegido é removido da lista antes do `taskkill`, inclusive com `-y` e na TUI. Flags: `--soft` (sem /F) e `--sem-arvore` (sem /T).
+- Falha de VM sai com código `1`.
+- Licenças (FlexNet/SNL) não fazem parte da ferramenta: aba, comandos `lic` e `sw borrow` foram removidos.
+- Disco (aba Suporte): só calcula por tecla `[r]`, em segundo plano, com `[Esc]` para cancelar e gráfico de barras.
+- Detalhes e lista completa de mudanças: `docs/V3_MUDANCAS.md`.

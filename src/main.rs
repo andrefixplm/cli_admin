@@ -1,7 +1,8 @@
 use cli_admin::config::{AppConfig, VmConfigEntry};
 use cli_admin::logger;
 use cli_admin::modules::net::{self, NetProtoFilter};
-use cli_admin::modules::process::{ProcessFilter, ProcessItem, ProcessKiller, ProcessShield};
+use cli_admin::modules::process::killer::separar_protegidos;
+use cli_admin::modules::process::{export, ProcessFilter, ProcessItem, ProcessKiller, ProcessShield};
 use cli_admin::modules::support;
 use cli_admin::modules::top::{
     GpuPdhCollector, NvidiaCollector, SortField, SystemMetricsManager,
@@ -15,9 +16,9 @@ use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "cli_admin",
+    name = "cli_admin_v3",
     author = "Andre PLM",
-    version = "1.0.0",
+    version,
     about = "Ferramenta modular de administração de VMware Workstation, TOP Métricas, Process Killer e Rede/Portas",
     long_about = "CLI Admin é um utilitário de alta performance escrito em Rust para gerenciar máquinas virtuais do VMware Workstation, monitorar consumo de hardware (CPU, RAM, Disco, GPU e VRAM) e pesquisar/finalizar processos com interface interativa (TUI) e comandos rápidos scriptáveis."
 )]
@@ -52,20 +53,31 @@ enum Commands {
     /// Lista portas ativas e finaliza o processo dono de uma porta
     Net(NetArgs),
 
-    /// Licenças FlexNet/SNL: uso, diagnóstico e liberação
-    Lic(LicArgs),
-
     /// Notas locais de campo (Markdown)
     Notes(NotesArgs),
 
     /// Diagnóstico de rede: ping, probe, mapa LAN, throughput, DNS
     Netdiag(NetdiagArgs),
 
-    /// SolidWorks: inventário, GPU, borrow, limpeza
-    Sw(SwArgs),
-
     /// Suporte Windows: disco, snapshot de serviços, boot
     Winsys(WinsysArgs),
+
+    /// Exporta a lista de processos (CSV ou JSON) com a linha de comando de cada um
+    Export(ExportArgs),
+}
+
+#[derive(Args, Debug)]
+struct ExportArgs {
+    /// Filtro opcional por nome ou PID (mesma busca da aba Processos)
+    query: Option<String>,
+
+    /// Formato do relatório: csv ou json
+    #[arg(short, long, default_value = "csv")]
+    format: String,
+
+    /// Arquivo de saída (padrão: processes_<timestamp>.<formato> no diretório atual)
+    #[arg(short, long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -182,13 +194,13 @@ struct KillArgs {
     /// Termo de busca (nome do processo ou PID)
     query: String,
 
-    /// Força o encerramento imediato (/F)
-    #[arg(short, long, default_value_t = true)]
-    force: bool,
+    /// Encerramento suave: sem /F. Padrão é forçado (/F), como antes
+    #[arg(long)]
+    soft: bool,
 
-    /// Finaliza a árvore de processos filhos (/T)
-    #[arg(short, long, default_value_t = true)]
-    tree: bool,
+    /// Não finaliza os processos filhos. Padrão inclui a árvore (/T)
+    #[arg(long)]
+    sem_arvore: bool,
 
     /// Não solicita confirmação antes de finalizar processos
     #[arg(short = 'y', long)]
@@ -235,13 +247,13 @@ enum NetAction {
         #[arg(long, default_value = "all")]
         proto: String,
 
-        /// Força o encerramento imediato (/F)
-        #[arg(short, long, default_value_t = true)]
-        force: bool,
+        /// Encerramento suave: sem /F. Padrão é forçado (/F)
+        #[arg(long)]
+        soft: bool,
 
-        /// Finaliza a árvore de processos filhos (/T)
-        #[arg(short, long, default_value_t = true)]
-        tree: bool,
+        /// Não finaliza os processos filhos. Padrão inclui a árvore (/T)
+        #[arg(long)]
+        sem_arvore: bool,
 
         /// Não solicita confirmação antes de finalizar processos
         #[arg(short = 'y', long)]
@@ -251,63 +263,6 @@ enum NetAction {
         #[arg(long)]
         dry_run: bool,
     },
-}
-
-#[derive(Args, Debug)]
-struct LicArgs {
-    #[command(subcommand)]
-    action: LicAction,
-}
-
-#[derive(Subcommand, Debug)]
-enum LicAction {
-    /// Lista uso de licenças FlexNet/SNL por feature
-    List {
-        /// Servidor porta@host (padrão: config licensing.default_server)
-        #[arg(long)]
-        server: Option<String>,
-        /// Filtra por feature específica
-        #[arg(long)]
-        feature: Option<String>,
-        /// Só mostra usuários (checkout ativos)
-        #[arg(long)]
-        users: bool,
-    },
-
-    /// Libera um checkout travado (lmremove)
-    Free {
-        /// Nome da feature (ex: solidworks)
-        #[arg(long)]
-        feature: String,
-        /// Usuário do checkout
-        #[arg(long)]
-        user: String,
-        /// Host do checkout
-        #[arg(long)]
-        host: String,
-        /// Display do checkout (padrão: = host)
-        #[arg(long)]
-        display: Option<String>,
-        /// Servidor porta@host
-        #[arg(long)]
-        server: Option<String>,
-        /// Não solicita confirmação
-        #[arg(short = 'y', long)]
-        yes: bool,
-    },
-
-    /// Diagnóstico de conexão com o servidor SNL (checklist)
-    Diag {
-        /// Host do servidor de licenças
-        #[arg(long)]
-        host: Option<String>,
-    },
-
-    /// Verifica menções às portas SNL no firewall
-    FirewallCheck,
-
-    /// Status do Siemens PLM License Server (SPLM)
-    SplmStatus,
 }
 
 #[derive(Args, Debug)]
@@ -406,44 +361,6 @@ enum NetdiagAction {
 }
 
 #[derive(Args, Debug)]
-struct SwArgs {
-    #[command(subcommand)]
-    action: SwAction,
-}
-
-#[derive(Subcommand, Debug)]
-enum SwAction {
-    /// Inventário: versões, pasta, data, seriais (mascarados)
-    Info,
-
-    /// Adaptadores de vídeo + heurística de certificação SW
-    Gpu,
-
-    /// Empréstimos (borrow) de licença no log do SNL
-    Borrow {
-        /// Caminho do debug log (padrão: config/autodetect)
-        #[arg(long)]
-        log: Option<PathBuf>,
-        /// Últimos N dias
-        #[arg(long, default_value_t = 30)]
-        days: u32,
-        /// Máximo de linhas a exibir
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
-    },
-
-    /// Lista temporários do SW (swx*/sld*.tmp) — remoção só com --apply
-    Clean {
-        /// Executa a remoção (padrão: somente lista)
-        #[arg(long)]
-        apply: bool,
-        /// Não solicita confirmação
-        #[arg(short = 'y', long)]
-        yes: bool,
-    },
-}
-
-#[derive(Args, Debug)]
 struct WinsysArgs {
     #[command(subcommand)]
     action: WinsysAction,
@@ -495,7 +412,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.debug,
     );
 
-    info!("Iniciando CLI Admin v1.0.0 com configuração: {:?}", config_path);
+    info!("Iniciando CLI Admin v{} com configuração: {:?}", env!("CARGO_PKG_VERSION"), config_path);
 
     // Se nenhum subcomando for fornecido ou se --interactive for passado, abrir o TUI
     match cli.command {
@@ -507,11 +424,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Commands::Top(args) => handle_top_cli(config, args).await?,
             Commands::Kill(args) => handle_kill_cli(config, args).await?,
             Commands::Net(args) => handle_net_cli(config, args).await?,
-            Commands::Lic(args) => handle_lic_cli(config, args).await?,
             Commands::Notes(args) => handle_notes_cli(config, args).await?,
             Commands::Netdiag(args) => handle_netdiag_cli(config, args).await?,
-            Commands::Sw(args) => handle_sw_cli(config, args).await?,
             Commands::Winsys(args) => handle_winsys_cli(config, args).await?,
+            Commands::Export(args) => handle_export_cli(config, args).await?,
         },
     }
 
@@ -549,7 +465,7 @@ async fn handle_vm_cli(
             println!("Iniciando VM '{}' ({}) no modo {}...", target, path.display(), mode.as_str());
             match client.start(&path, mode).await {
                 Ok(_) => println!("✔ Máquina virtual iniciada com sucesso."),
-                Err(e) => eprintln!("✖ Erro ao iniciar máquina virtual: {}", e),
+                Err(e) => return Err(format!("✖ Erro ao iniciar máquina virtual: {}", e).into()),
             }
         }
         VmAction::Stop { target, hard } => {
@@ -558,7 +474,7 @@ async fn handle_vm_cli(
             println!("Parando VM '{}' no modo {}...", target, mode.as_str());
             match client.stop(&path, mode).await {
                 Ok(_) => println!("✔ Máquina virtual parada com sucesso."),
-                Err(e) => eprintln!("✖ Erro ao parar máquina virtual: {}", e),
+                Err(e) => return Err(format!("✖ Erro ao parar máquina virtual: {}", e).into()),
             }
         }
         VmAction::Pause { target } => {
@@ -566,7 +482,7 @@ async fn handle_vm_cli(
             println!("Pausando VM '{}'...", target);
             match client.pause(&path).await {
                 Ok(_) => println!("✔ Máquina virtual pausada com sucesso."),
-                Err(e) => eprintln!("✖ Erro ao pausar máquina virtual: {}", e),
+                Err(e) => return Err(format!("✖ Erro ao pausar máquina virtual: {}", e).into()),
             }
         }
         VmAction::Unpause { target } => {
@@ -574,7 +490,7 @@ async fn handle_vm_cli(
             println!("Retomando VM '{}'...", target);
             match client.unpause(&path).await {
                 Ok(_) => println!("✔ Máquina virtual retomada com sucesso."),
-                Err(e) => eprintln!("✖ Erro ao retomar máquina virtual: {}", e),
+                Err(e) => return Err(format!("✖ Erro ao retomar máquina virtual: {}", e).into()),
             }
         }
         VmAction::Suspend { target, hard } => {
@@ -583,7 +499,7 @@ async fn handle_vm_cli(
             println!("Suspendendo VM '{}'...", target);
             match client.suspend(&path, mode).await {
                 Ok(_) => println!("✔ Máquina virtual suspensa com sucesso."),
-                Err(e) => eprintln!("✖ Erro ao suspender máquina virtual: {}", e),
+                Err(e) => return Err(format!("✖ Erro ao suspender máquina virtual: {}", e).into()),
             }
         }
         VmAction::Reset { target, hard } => {
@@ -592,7 +508,7 @@ async fn handle_vm_cli(
             println!("Reiniciando VM '{}'...", target);
             match client.reset(&path, mode).await {
                 Ok(_) => println!("✔ Máquina virtual reiniciada com sucesso."),
-                Err(e) => eprintln!("✖ Erro ao reiniciar máquina virtual: {}", e),
+                Err(e) => return Err(format!("✖ Erro ao reiniciar máquina virtual: {}", e).into()),
             }
         }
         VmAction::Snapshot { action } => match action {
@@ -610,7 +526,7 @@ async fn handle_vm_cli(
                             }
                         }
                     }
-                    Err(e) => eprintln!("✖ Erro ao listar snapshots: {}", e),
+                    Err(e) => return Err(format!("✖ Erro ao listar snapshots: {}", e).into()),
                 }
             }
             SnapshotAction::Create { target, name } => {
@@ -618,7 +534,7 @@ async fn handle_vm_cli(
                 println!("Criando snapshot '{}' na VM '{}'...", name, target);
                 match client.create_snapshot(&path, &name).await {
                     Ok(_) => println!("✔ Snapshot criado com sucesso!"),
-                    Err(e) => eprintln!("✖ Erro ao criar snapshot: {}", e),
+                    Err(e) => return Err(format!("✖ Erro ao criar snapshot: {}", e).into()),
                 }
             }
             SnapshotAction::Revert { target, name } => {
@@ -626,7 +542,7 @@ async fn handle_vm_cli(
                 println!("Revertendo VM '{}' para snapshot '{}'...", target, name);
                 match client.revert_snapshot(&path, &name).await {
                     Ok(_) => println!("✔ Máquina virtual revertida com sucesso!"),
-                    Err(e) => eprintln!("✖ Erro ao reverter snapshot: {}", e),
+                    Err(e) => return Err(format!("✖ Erro ao reverter snapshot: {}", e).into()),
                 }
             }
         },
@@ -654,7 +570,7 @@ async fn handle_vm_cli(
                         );
                     }
                 }
-                Err(e) => eprintln!("✖ Erro ao salvar configuração: {}", e),
+                Err(e) => return Err(format!("✖ Erro ao salvar configuração: {}", e).into()),
             }
         }
     }
@@ -718,7 +634,7 @@ async fn handle_top_cli(
         println!(
             "{:<8} {:<30} {:<10.1} {:<12.1} {:<14.1} {:<10.1} {:<12.1}",
             p.pid,
-            if p.name.len() > 28 { &p.name[..28] } else { &p.name },
+            cli_admin::texto::truncar(&p.name, 28),
             p.cpu_pct,
             p.memory_mb(),
             p.total_disk_io_kb_sec(),
@@ -729,6 +645,68 @@ async fn handle_top_cli(
     println!();
 
     Ok(())
+}
+
+async fn handle_export_cli(
+    config: AppConfig,
+    args: ExportArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let format = args.format.to_lowercase();
+    if format != "csv" && format != "json" {
+        return Err(format!("Formato '{}' não suportado. Use csv ou json.", args.format).into());
+    }
+
+    println!("Coletando lista de processos...");
+
+    let mut system_manager = SystemMetricsManager::new();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    system_manager.refresh();
+
+    let shield = ProcessShield::new(&config.security.protected_processes);
+    let dummy_gpu = std::collections::HashMap::new();
+    let items: Vec<ProcessItem> = system_manager
+        .get_all_processes(&dummy_gpu)
+        .iter()
+        .map(|p| ProcessItem::from_resource(p, shield.is_protected(&p.name, p.pid), false))
+        .collect();
+
+    let query = args.query.unwrap_or_default();
+    let mut selected: Vec<ProcessItem> = ProcessFilter::new()
+        .filter(&query, &items)
+        .into_iter()
+        .cloned()
+        .collect();
+    selected.sort_by(|a, b| b.memory_bytes.cmp(&a.memory_bytes));
+
+    let content = export::render(&selected, &format)?;
+    let path = match args.output {
+        Some(path) => path.to_string_lossy().to_string(),
+        None => export::default_filename(&format),
+    };
+    export::write_file(&path, &content)?;
+
+    println!("Exportados {} processos para {}", selected.len(), path);
+
+    let sem_cmd = selected.iter().filter(|p| p.cmd_line.is_empty()).count();
+    if sem_cmd > 0 {
+        println!(
+            "Aviso: {} processo(s) sem linha de comando. Execute como Administrador para ler processos de outros usuários e do sistema.",
+            sem_cmd
+        );
+    }
+
+    Ok(())
+}
+
+/// Pergunta `pergunta (s/N)` e devolve `true` só para uma resposta afirmativa.
+/// Única implementação da confirmação, usada por kill e net kill.
+fn confirmar(pergunta: &str) -> std::io::Result<bool> {
+    use std::io::{self, Write};
+    print!("{pergunta} (s/N): ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(matches!(input.trim().to_lowercase().as_str(), "s" | "sim" | "y" | "yes"))
 }
 
 async fn handle_kill_cli(
@@ -748,23 +726,7 @@ async fn handle_kill_cli(
         .into_iter()
         .map(|p| {
             let is_protected = shield.is_protected(&p.name, p.pid);
-            ProcessItem {
-                pid: p.pid,
-                name: p.name,
-                cpu_pct: p.cpu_pct,
-                memory_bytes: p.memory_bytes,
-                is_protected,
-                selected: false,
-                exe_path: p.exe_path,
-                user: p.user,
-                start_time: p.start_time,
-                threads: p.threads,
-                parent_pid: p.parent_pid,
-                gpu_pct: p.gpu_pct,
-                vram_bytes: p.vram_bytes,
-                disk_read_bytes_sec: p.disk_read_bytes_sec,
-                disk_write_bytes_sec: p.disk_write_bytes_sec,
-            }
+            ProcessItem::from_resource(&p, is_protected, false)
         })
         .collect();
 
@@ -779,24 +741,27 @@ async fn handle_kill_cli(
     println!("{:<8} {:<14} {:<32} {:<10}", "PID", "STATUS", "NOME", "RAM (MB)");
     println!("{:-<8} {:-<14} {:-<32} {:-<10}", "", "", "", "");
 
-    let mut pids_to_kill = Vec::new();
-    let mut has_critical = false;
-
-    for p in matches {
-        pids_to_kill.push(p.pid);
-        let status = if p.is_protected {
-            has_critical = true;
-            "🛡️ CRÍTICO"
-        } else {
-            "NORMAL"
-        };
+    for p in &matches {
+        let status = if p.is_protected { "🛡️ CRÍTICO" } else { "NORMAL" };
         println!("{:<8} {:<14} {:<32} {:<10.1}", p.pid, status, p.name, p.memory_mb());
     }
 
     println!();
 
-    if has_critical {
-        eprintln!("🚨 ALERTA: A lista contém processos vitais do Windows protegidos por configuração!");
+    // Escudo (A-02): protegidos nunca entram na lista de encerramento, nem com -y.
+    let alvos: Vec<(u32, bool)> = matches.iter().map(|p| (p.pid, p.is_protected)).collect();
+    let (pids_to_kill, bloqueados) = separar_protegidos(&alvos);
+    if !bloqueados.is_empty() {
+        eprintln!(
+            "🚨 {} processo(s) protegido(s) IGNORADO(S), não serão encerrados: {:?}",
+            bloqueados.len(),
+            bloqueados
+        );
+    }
+
+    if pids_to_kill.is_empty() {
+        println!("Nenhum processo elegível para encerrar.");
+        return Ok(());
     }
 
     if args.dry_run {
@@ -804,21 +769,13 @@ async fn handle_kill_cli(
         return Ok(());
     }
 
-    if !args.yes {
-        print!("Deseja realmente finalizar os {} processo(s) acima? (s/N): ", pids_to_kill.len());
-        use std::io::{self, Write};
-        io::stdout().flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let trimmed = input.trim().to_lowercase();
-        if trimmed != "s" && trimmed != "sim" && trimmed != "y" && trimmed != "yes" {
-            println!("Operação cancelada pelo usuário.");
-            return Ok(());
-        }
+    if !args.yes && !confirmar(&format!("Deseja realmente finalizar os {} processo(s) acima?", pids_to_kill.len()))? {
+        println!("Operação cancelada pelo usuário.");
+        return Ok(());
     }
 
     println!("Finalizando processos...");
-    let results = ProcessKiller::kill_batch(&pids_to_kill, args.force, args.tree).await;
+    let results = ProcessKiller::kill_batch(&pids_to_kill, !args.soft, !args.sem_arvore).await;
 
     for (pid, res) in results {
         match res {
@@ -896,11 +853,7 @@ async fn handle_net_cli(
             );
             for c in &filtered {
                 let status = if c.is_protected { "🛡️ CRÍTICO" } else { "NORMAL" };
-                let name = if c.process_name.len() > 26 {
-                    &c.process_name[..26]
-                } else {
-                    &c.process_name
-                };
+                let name = cli_admin::texto::truncar(&c.process_name, 26);
                 println!(
                     "{:<6} {:<24} {:<24} {:<12} {:<8} {:<28} {:<10}",
                     c.proto_label(),
@@ -918,8 +871,8 @@ async fn handle_net_cli(
         NetAction::Kill {
             port,
             proto,
-            force,
-            tree,
+            soft,
+            sem_arvore,
             yes,
             dry_run,
         } => {
@@ -945,22 +898,13 @@ async fn handle_net_cli(
                 return Ok(());
             }
 
-            // PIDs distintos donos da porta
-            let mut seen = std::collections::HashSet::new();
-            let mut pids_to_kill = Vec::new();
-            let mut has_critical = false;
             println!("\nSockets na porta {}:", port);
             println!(
                 "{:<6} {:<24} {:<12} {:<8} {:<28} {:<10}",
                 "PROTO", "LOCAL", "ESTADO", "PID", "PROCESSO", "STATUS"
             );
             for c in &targets {
-                let status = if c.is_protected {
-                    has_critical = true;
-                    "🛡️ CRÍTICO"
-                } else {
-                    "NORMAL"
-                };
+                let status = if c.is_protected { "🛡️ CRÍTICO" } else { "NORMAL" };
                 println!(
                     "{:<6} {:<24} {:<12} {:<8} {:<28} {:<10}",
                     c.proto_label(),
@@ -970,14 +914,28 @@ async fn handle_net_cli(
                     c.process_name,
                     status
                 );
-                if seen.insert(c.pid) {
-                    pids_to_kill.push(c.pid);
-                }
             }
             println!();
 
-            if has_critical {
-                eprintln!("🚨 ALERTA: a porta pertence a processo(s) vital(is) do Windows protegido(s)!");
+            // PIDs distintos donos da porta; protegidos ficam de fora (A-02)
+            let mut seen = std::collections::HashSet::new();
+            let alvos: Vec<(u32, bool)> = targets
+                .iter()
+                .filter(|c| seen.insert(c.pid))
+                .map(|c| (c.pid, c.is_protected))
+                .collect();
+            let (pids_to_kill, bloqueados) = separar_protegidos(&alvos);
+            if !bloqueados.is_empty() {
+                eprintln!(
+                    "🚨 {} processo(s) protegido(s) IGNORADO(S), não serão encerrados: {:?}",
+                    bloqueados.len(),
+                    bloqueados
+                );
+            }
+
+            if pids_to_kill.is_empty() {
+                println!("Nenhum processo elegível para encerrar na porta {}.", port);
+                return Ok(());
             }
 
             if dry_run {
@@ -985,25 +943,19 @@ async fn handle_net_cli(
                 return Ok(());
             }
 
-            if !yes {
-                print!(
-                    "Deseja realmente finalizar {} processo(s) dono(s) da porta {}? (s/N): ",
+            if !yes
+                && !confirmar(&format!(
+                    "Deseja realmente finalizar {} processo(s) dono(s) da porta {}?",
                     pids_to_kill.len(),
                     port
-                );
-                use std::io::{self, Write};
-                io::stdout().flush()?;
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-                let trimmed = input.trim().to_lowercase();
-                if trimmed != "s" && trimmed != "sim" && trimmed != "y" && trimmed != "yes" {
-                    println!("Operação cancelada pelo usuário.");
-                    return Ok(());
-                }
+                ))?
+            {
+                println!("Operação cancelada pelo usuário.");
+                return Ok(());
             }
 
             println!("Finalizando processos...");
-            let results = ProcessKiller::kill_batch(&pids_to_kill, force, tree).await;
+            let results = ProcessKiller::kill_batch(&pids_to_kill, !soft, !sem_arvore).await;
             for (pid, res) in results {
                 match res {
                     Ok(msg) => println!("✔ PID {}: {}", pid, msg),
@@ -1013,157 +965,6 @@ async fn handle_net_cli(
         }
     }
 
-    Ok(())
-}
-
-fn resolve_lmutil(config: &AppConfig) -> Result<std::path::PathBuf, String> {
-    support::discover_lmutil(config.licensing.lmutil_path.as_deref()).ok_or_else(|| {
-        "lmutil.exe não encontrado. Instale o SolidNetWork License Manager ou configure licensing.lmutil_path no config.toml.".to_string()
-    })
-}
-
-async fn handle_lic_cli(
-    config: AppConfig,
-    args: LicArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match args.action {
-        LicAction::List { server, feature, users } => {
-            let lmutil = resolve_lmutil(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            let srv = server.or(config.licensing.default_server.clone());
-            let features = support::query_all(&lmutil, srv.as_deref()).await?;
-            let features: Vec<_> = match feature {
-                Some(f) => features.into_iter().filter(|x| x.name.eq_ignore_ascii_case(&f)).collect(),
-                None => features,
-            };
-            if features.is_empty() {
-                println!("Nenhuma feature encontrada.");
-                return Ok(());
-            }
-            println!("\n=== LICENÇAS FLEXNET/SNL ===");
-            println!("{:<24} {:<8} {:<8} {:<8} {:<8}", "FEATURE", "TOTAL", "EM USO", "LIVRES", "USO%");
-            let mut below_threshold = false;
-            for f in &features {
-                println!(
-                    "{:<24} {:<8} {:<8} {:<8} {:<8.0}",
-                    f.name, f.total_issued, f.total_used, f.free(), f.use_pct()
-                );
-                if f.free() < config.licensing.min_free_threshold {
-                    below_threshold = true;
-                    println!(
-                        "  ⚠ '{}' com apenas {} livre(s) (limite: {})",
-                        f.name, f.free(), config.licensing.min_free_threshold
-                    );
-                }
-                if users {
-                    for u in &f.users {
-                        println!(
-                            "    {} @ {} (display {}, desde {})",
-                            u.user, u.host, u.display, u.checkout
-                        );
-                    }
-                }
-            }
-            println!();
-            if below_threshold {
-                std::process::exit(2);
-            }
-        }
-        LicAction::Free { feature, user, host, display, server, yes } => {
-            let lmutil = resolve_lmutil(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            let srv = server.or(config.licensing.default_server.clone());
-            // Localiza o checkout exato antes de liberar
-            let features = support::query_all(&lmutil, srv.as_deref()).await?;
-            let target = features
-                .iter()
-                .find(|f| f.name.eq_ignore_ascii_case(&feature))
-                .and_then(|f| {
-                    f.users.iter().find(|u| {
-                        u.user.eq_ignore_ascii_case(&user) && u.host.eq_ignore_ascii_case(&host)
-                    })
-                })
-                .cloned();
-            let target = match target {
-                Some(u) => u,
-                None => {
-                    eprintln!("Checkout não encontrado: feature '{}' user '{}' host '{}'.", feature, user, host);
-                    return Ok(());
-                }
-            };
-            let disp = display.unwrap_or_else(|| target.display.clone());
-            let target = support::LicUser { display: disp, ..target };
-            if !yes {
-                print!(
-                    "Liberar '{}' de {} @ {} (desde {})? (s/N): ",
-                    feature, target.user, target.host, target.checkout
-                );
-                use std::io::{self, Write};
-                io::stdout().flush()?;
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-                let t = input.trim().to_lowercase();
-                if t != "s" && t != "sim" && t != "y" && t != "yes" {
-                    println!("Operação cancelada pelo usuário.");
-                    return Ok(());
-                }
-            }
-            match support::free_checkout(&lmutil, srv.as_deref(), &feature, &target).await {
-                Ok(msg) => println!("✔ Checkout liberado. {}", msg.trim()),
-                Err(e) => eprintln!("✖ Erro ao liberar checkout: {}", e),
-            }
-        }
-        LicAction::Diag { host } => {
-            let server = host
-                .or_else(|| {
-                    config.licensing.default_server.as_ref().and_then(|s| {
-                        s.rsplit_once('@').map(|(_, h)| h.to_string())
-                    })
-                })
-                .unwrap_or_else(|| "localhost".to_string());
-            println!("\n=== DIAGNÓSTICO SNL ({}) ===", server);
-            let checks = support::diagnose_snl(
-                &server,
-                config.licensing.lm_port,
-                config.licensing.vendor_port,
-            )
-            .await;
-            let mut failed = 0;
-            for c in &checks {
-                let mark = if c.ok { "✔" } else { failed += 1; "✖" };
-                println!("{} {}: {}", mark, c.name, c.detail);
-            }
-            println!();
-            if failed > 0 {
-                eprintln!("{} verificação(ões) com falha.", failed);
-            }
-        }
-        LicAction::FirewallCheck => {
-            println!("\n=== FIREWALL x PORTAS SNL (25734/25735) ===");
-            match support::firewall_mentions_ports(&[25734, 25735]).await {
-                Ok(hits) if hits.is_empty() => {
-                    println!("Nenhuma regra mencionando 25734/25735. Verifique exceções p/ lmgrd.exe e sw_d.exe.");
-                }
-                Ok(hits) => {
-                    for h in hits {
-                        println!("  {}", h);
-                    }
-                }
-                Err(e) => eprintln!("✖ {}", e),
-            }
-            println!();
-        }
-        LicAction::SplmStatus => {
-            println!("\n=== SIEMENS PLM LICENSE SERVER ===");
-            let st = support::splm_status();
-            if st.is_empty() {
-                println!("Nenhum serviço SPLM encontrado nesta máquina.");
-            } else {
-                for (display, state, _) in st {
-                    println!("  {} : {}", display, state);
-                }
-            }
-            println!();
-        }
-    }
     Ok(())
 }
 
@@ -1336,111 +1137,6 @@ async fn handle_netdiag_cli(
                 for ip in ips {
                     println!("  {}", ip);
                 }
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn handle_sw_cli(
-    config: AppConfig,
-    args: SwArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match args.action {
-        SwAction::Info => {
-            let installs = support::sw_installations();
-            if installs.is_empty() {
-                println!("Nenhuma instalação do SolidWorks encontrada no registro.");
-                return Ok(());
-            }
-            println!("\n=== SOLIDWORKS INSTALADO ===");
-            for inst in &installs {
-                println!("Versão  : {}", inst.version_key);
-                println!("Pasta   : {}", if inst.install_dir.is_empty() { "<n/d>" } else { &inst.install_dir });
-                println!("Instal. : {}", if inst.install_date.is_empty() { "<n/d>" } else { &inst.install_date });
-                if inst.serials.is_empty() {
-                    println!("Seriais : <nenhum no registro>");
-                } else {
-                    println!("Seriais :");
-                    for (prod, sn) in &inst.serials {
-                        println!("  {:<22} {}", prod, sn);
-                    }
-                }
-                println!();
-            }
-        }
-        SwAction::Gpu => {
-            println!("\n=== ADAPTADORES DE VÍDEO ===");
-            let adapters = support::gpu_adapters().await;
-            if adapters.is_empty() {
-                println!("Nenhum adaptador detectado (WMI indisponível).");
-            }
-            for a in &adapters {
-                println!("{} | driver {} | {} MB", a.name, a.driver_version, a.ram_mb);
-                println!("  → {}", support::certified_status(&a.name));
-            }
-            if let Some(drv) = support::nvidia_driver_version().await {
-                println!("Driver NVIDIA (nvidia-smi): {}", drv);
-            }
-            println!();
-        }
-        SwAction::Borrow { log, days, limit } => {
-            let log_path = match log {
-                Some(p) => Some(p),
-                None => support::discover_snl_log(config.solidworks.snl_log_path.as_deref()),
-            };
-            let log_path = match log_path {
-                Some(p) => p,
-                None => {
-                    eprintln!("Debug log do SNL não encontrado. Configure solidworks.snl_log_path.");
-                    return Ok(());
-                }
-            };
-            let text = std::fs::read_to_string(&log_path)?;
-            let entries = support::parse_borrow_log(&text);
-            println!("\n=== BORROW SNL ({} — últimos {} dias, top {}) ===", log_path.display(), days, limit);
-            if entries.is_empty() {
-                println!("Nenhum empréstimo registrado.");
-            }
-            for e in entries.iter().rev().take(limit) {
-                println!("  {}  {:<20} {}", e.time, e.feature, e.user_host);
-            }
-            println!("Total no log: {} registro(s).", entries.len());
-            println!();
-        }
-        SwAction::Clean { apply, yes } => {
-            let roots = support::default_clean_roots(&config.solidworks.clean_extra_paths);
-            let items = support::scan_clean_targets(&roots);
-            if items.is_empty() {
-                println!("Nenhum temporário do SW para limpar.");
-                return Ok(());
-            }
-            let total: u64 = items.iter().map(|i| i.bytes).sum();
-            println!("\n=== LIMPEZA SOLIDWORKS (somente leitura) ===");
-            for i in &items {
-                println!("  {:<10} {}", support::bytes_to_human(i.bytes), i.path.display());
-            }
-            println!("Total recuperável: {}", support::bytes_to_human(total));
-            if !apply {
-                println!("\nNada foi removido. Reexecute com --apply para limpar.");
-                return Ok(());
-            }
-            if !yes {
-                print!("Remover {} item(ns)? (s/N): ", items.len());
-                use std::io::{self, Write};
-                io::stdout().flush()?;
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-                let t = input.trim().to_lowercase();
-                if t != "s" && t != "sim" && t != "y" && t != "yes" {
-                    println!("Operação cancelada pelo usuário.");
-                    return Ok(());
-                }
-            }
-            let (removed, errors) = support::delete_clean_targets(&items);
-            println!("✔ Removidos: {} item(ns).", removed);
-            for e in errors {
-                eprintln!("✖ {}", e);
             }
         }
     }

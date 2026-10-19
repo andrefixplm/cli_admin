@@ -2,6 +2,7 @@ use super::winsvc::{enum_hkcu_values, enum_hklm_values, list_services};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Entrada do ranking de disco: filho direto + tamanho recursivo.
 #[derive(Debug, Clone)]
@@ -26,14 +27,71 @@ pub fn bytes_to_human(bytes: u64) -> String {
     }
 }
 
+/// Capacidade e espaço livre da unidade (volume) que contém um caminho.
+#[derive(Debug, Clone)]
+pub struct VolumeInfo {
+    pub mount: String,
+    pub total: u64,
+    pub free: u64,
+}
+
+/// Volume que contém `path`. `None` se o caminho não existir ou estiver em unidade de rede (UNC).
+///
+/// Consulta só a unidade do caminho (`GetDiskFreeSpaceExW`). Não usa `sysinfo::Disks`, que
+/// enumera todas as unidades e chegou a levar mais de 3 minutos com unidade de rede lenta.
+#[cfg(windows)]
+pub fn volume_info(path: &Path) -> Option<VolumeInfo> {
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    use windows::core::PCWSTR;
+
+    let abs = std::fs::canonicalize(path).ok()?;
+    let texto = abs.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+    let mut chars = texto.chars();
+    let letra = chars.next()?;
+    if !letra.is_ascii_alphabetic() || chars.next()? != ':' {
+        return None;
+    }
+    let raiz = format!("{}:\\", letra.to_ascii_uppercase());
+    let wide: Vec<u16> = raiz.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let (mut livre_usuario, mut total, mut livre_total) = (0u64, 0u64, 0u64);
+    // SAFETY: `wide` termina em NUL e vive até o fim da chamada; os três ponteiros apontam para
+    // variáveis locais válidas.
+    unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut livre_usuario as *mut u64),
+            Some(&mut total as *mut u64),
+            Some(&mut livre_total as *mut u64),
+        )
+        .ok()?;
+    }
+    Some(VolumeInfo { mount: raiz, total, free: livre_usuario })
+}
+
+#[cfg(not(windows))]
+pub fn volume_info(_path: &Path) -> Option<VolumeInfo> {
+    None
+}
+
 /// Top filhos diretos de `root` por tamanho recursivo (sob demanda — pode demorar).
+/// Versão que não cancela: usada pelo comando `winsys disk-top`.
 pub fn disk_top(root: &Path, n: usize) -> Vec<DiskEntry> {
+    disk_top_cancelavel(root, n, &AtomicBool::new(false)).unwrap_or_default()
+}
+
+/// Igual a [`disk_top`], mas consulta `cancel` a cada entrada visitada.
+/// Devolve `None` se foi cancelado. Feita para rodar em thread própria (TUI).
+pub fn disk_top_cancelavel(root: &Path, n: usize, cancel: &AtomicBool) -> Option<Vec<DiskEntry>> {
     let mut acc: HashMap<PathBuf, u64> = HashMap::new();
     for entry in walkdir::WalkDir::new(root)
         .min_depth(1)
         .into_iter()
         .filter_map(|e| e.ok())
     {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let rel = match entry.path().strip_prefix(root) {
             Ok(r) => r,
             Err(_) => continue,
@@ -55,7 +113,7 @@ pub fn disk_top(root: &Path, n: usize) -> Vec<DiskEntry> {
         .collect();
     entries.sort_by(|a, b| b.bytes.cmp(&a.bytes));
     entries.truncate(n.max(1));
-    entries
+    Some(entries)
 }
 
 /// Snapshot de serviços para diff antes/depois.

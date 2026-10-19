@@ -4,6 +4,24 @@ use tracing::{debug, error, info};
 
 pub struct ProcessKiller;
 
+/// Separa os PIDs que podem ser encerrados dos que são protegidos.
+///
+/// Regra de segurança (ver AGENTS.md, "Segurança: ProcessShield"): processo protegido nunca
+/// entra na lista de encerramento, nem com `-y`. O chamador recebe a lista dos bloqueados
+/// para informar o usuário. Entrada: pares `(pid, é_protegido)`.
+pub fn separar_protegidos(alvos: &[(u32, bool)]) -> (Vec<u32>, Vec<u32>) {
+    let mut liberados = Vec::new();
+    let mut bloqueados = Vec::new();
+    for &(pid, protegido) in alvos {
+        if protegido {
+            bloqueados.push(pid);
+        } else {
+            liberados.push(pid);
+        }
+    }
+    (liberados, bloqueados)
+}
+
 impl ProcessKiller {
     /// Finaliza um processo pelo PID utilizando taskkill no Windows
     pub async fn kill(pid: u32, force: bool, tree: bool) -> Result<String, String> {

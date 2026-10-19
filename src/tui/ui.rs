@@ -1,4 +1,4 @@
-use super::app::{ActiveTab, AddVmField, App, InputMode, LicRow, ModalState, ProcSort, SupportSection};
+use super::app::{ActiveTab, AddVmField, App, InputMode, ModalState, ProcSort, SupportSection};
 use crate::modules::net::NetSort;
 use crate::modules::top::SortField;
 use crate::modules::vmware::VmStatus;
@@ -7,7 +7,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Clear, Gauge, Paragraph, Row, Table, Tabs,
+        Block, BorderType, Borders, Clear, Gauge, Paragraph, Row, Table, Tabs, Wrap,
     },
     Frame,
 };
@@ -32,7 +32,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ActiveTab::TopMetrics => draw_top_tab(f, chunks[1], app),
         ActiveTab::ProcessManager => draw_process_tab(f, chunks[1], app),
         ActiveTab::Network => draw_network_tab(f, chunks[1], app),
-        ActiveTab::Licenses => draw_licenses_tab(f, chunks[1], app),
+        ActiveTab::Files => super::fm_ui::draw_files_tab(f, chunks[1], &mut app.fm),
         ActiveTab::Support => draw_support_tab(f, chunks[1], app),
     }
 
@@ -42,9 +42,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match &app.modal {
         ModalState::ConfirmKill { pids, has_critical } => {
             draw_confirm_kill_modal(f, size, pids, *has_critical);
-        }
-        ModalState::ConfirmLicFree { feature, user } => {
-            draw_confirm_licfree_modal(f, size, feature, &user.user, &user.host);
         }
         ModalState::CreateSnapshot { snapshot_name, .. } => {
             draw_snapshot_modal(f, size, snapshot_name);
@@ -71,7 +68,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(" [2] 📊 TOP ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(" [3] 🎯 Processos ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(" [4] 🌐 Rede ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled(" [5] 🎫 Licenças ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" [5] 📁 Arquivos ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(" [6] 🧰 Suporte ", Style::default().add_modifier(Modifier::BOLD)),
     ];
 
@@ -317,7 +314,7 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
             .constraints([
                 Constraint::Length(3),  // Search bar
                 Constraint::Min(8),     // Process table
-                Constraint::Length(6),  // Details panel
+                Constraint::Length(8),  // Details panel
             ])
             .split(area)
     } else {
@@ -388,6 +385,7 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
         proc_col_label("CPU %", ProcSort::Cpu),
         proc_col_label("MEMÓRIA (MB)", ProcSort::Ram),
         proc_col_label("VRAM (MB)", ProcSort::Vram),
+        Span::styled("LINHA DE COMANDO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
     ];
     let header_row = Row::new(header_cells).height(1).bottom_margin(1);
 
@@ -424,6 +422,12 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
                 Span::styled(format!("{:.1}%", proc.cpu_pct), Style::default().fg(Color::White)),
                 Span::styled(format!("{:.1}", proc.memory_mb()), Style::default().fg(Color::LightCyan)),
                 Span::styled(format!("{:.1}", proc.vram_mb()), vram_style),
+                // Linha completa do processo. Vazia = sem permissão para ler (outro usuário/sistema)
+                if proc.cmd_line.is_empty() {
+                    Span::styled("— (sem permissão; use Administrador)", Style::default().fg(Color::DarkGray))
+                } else {
+                    Span::styled(proc.cmd_line.as_str(), Style::default().fg(Color::Gray))
+                },
             ];
 
             let row_style = Style::default();
@@ -442,6 +446,7 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
             Constraint::Length(10),
             Constraint::Length(14),
             Constraint::Length(14),
+            Constraint::Min(30),
         ],
     )
     .header(header_row)
@@ -479,6 +484,10 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
                     Span::raw(proc.parent_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string())),
                 ]),
                 Line::from(vec![
+                    Span::styled("Cmd: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(if proc.cmd_line.is_empty() { "<não disponível (execute como Administrador)>" } else { &proc.cmd_line }),
+                ]),
+                Line::from(vec![
                     Span::styled("GPU: ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
                     Span::raw(format!("{:.1}%", proc.gpu_pct)),
                     Span::raw("  |  "),
@@ -499,6 +508,7 @@ fn draw_process_tab(f: &mut Frame, area: Rect, app: &mut App) {
 
             let details = Paragraph::new(details_text)
                 .block(details_block)
+                .wrap(Wrap { trim: false })
                 .style(Style::default().fg(Color::White));
 
             f.render_widget(details, chunks[2]);
@@ -669,146 +679,10 @@ fn draw_network_tab(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_stateful_widget(table, chunks[2], &mut app.net_table_state);
 }
 
-fn draw_licenses_tab(f: &mut Frame, area: Rect, app: &mut App) {
-    let has_diag = !app.lic_diag.is_empty();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),  // Status lmutil
-            Constraint::Min(8),     // Tabela features/checkouts
-            Constraint::Length(if has_diag { 8 } else { 3 }), // Diagnóstico
-        ])
-        .split(area);
-
-    // 1. Linha de status da fonte
-    let lmutil_txt = match &app.lic_lmutil {
-        Some(p) => format!("lmutil: {} | servidor: {} | [r] atualiza [Enter] expande [f] libera [d] diag",
-            p.display(),
-            app.config.licensing.default_server.as_deref().unwrap_or("(padrão)")),
-        None => "lmutil.exe NÃO ENCONTRADO — configure licensing.lmutil_path (funcionalidade limitada)".to_string(),
-    };
-    let status_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Gray))
-        .title(" Licenças FlexNet/SNL ");
-    f.render_widget(Paragraph::new(lmutil_txt).block(status_block), chunks[0]);
-
-    // 2. Tabela de features + checkouts
-    let header_cells = vec![
-        Span::styled("FEATURE / CHECKOUT", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("TOTAL", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("EM USO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("LIVRES", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("USO%", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-    ];
-    let header_row = Row::new(header_cells).height(1).bottom_margin(1);
-
-    let rows: Vec<Row> = app
-        .lic_rows
-        .iter()
-        .map(|row| match row {
-            LicRow::Feature { index, expanded } => {
-                let feat = &app.lic_features[*index];
-                let marker = if *expanded { "▾" } else { "▸" };
-                let use_style = if feat.use_pct() > 85.0 {
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                } else if feat.use_pct() > 60.0 {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default().fg(Color::Green)
-                };
-                let cells = vec![
-                    Span::styled(
-                        format!("{} {}", marker, feat.name),
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(format!("{}", feat.total_issued)),
-                    Span::raw(format!("{}", feat.total_used)),
-                    Span::styled(
-                        format!("{}", feat.free()),
-                        if feat.free() < app.config.licensing.min_free_threshold {
-                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(Color::Gray)
-                        },
-                    ),
-                    Span::styled(format!("{:.0}%", feat.use_pct()), use_style),
-                ];
-                Row::new(cells).style(Style::default().bg(Color::Rgb(22, 30, 40)))
-            }
-            LicRow::User { user } => {
-                let cells = vec![
-                    Span::styled(
-                        format!("    {} @ {} (desde {})", user.user, user.host, user.checkout),
-                        Style::default().fg(Color::Cyan),
-                    ),
-                    Span::raw(""),
-                    Span::raw(""),
-                    Span::raw(""),
-                    Span::raw(""),
-                ];
-                Row::new(cells)
-            }
-        })
-        .collect();
-
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Min(30),
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Length(8),
-        ],
-    )
-    .header(header_row)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .title(format!(" Features ({} linhas) ", app.lic_rows.len()))
-            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-    )
-    .row_highlight_style(Style::default().bg(Color::Rgb(30, 45, 60)))
-    .highlight_symbol("▶ ");
-
-    f.render_stateful_widget(table, chunks[1], &mut app.lic_table_state);
-
-    // 3. Diagnóstico SNL (após tecla d)
-    if has_diag {
-        let lines: Vec<Line> = app
-            .lic_diag
-            .iter()
-            .map(|c| {
-                let mark = if c.ok { "✔" } else { "✖" };
-                let color = if c.ok { Color::Green } else { Color::Red };
-                Line::from(vec![
-                    Span::styled(format!("{} {}: ", mark, c.name), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                    Span::raw(c.detail.clone()),
-                ])
-            })
-            .collect();
-        let diag_block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title(" Diagnóstico SNL ");
-        f.render_widget(Paragraph::new(lines).block(diag_block), chunks[2]);
-    } else {
-        let hint = Paragraph::new("Pressione [d] para rodar o diagnóstico SNL (serviço, portas, registro, ping).")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded));
-        f.render_widget(hint, chunks[2]);
-    }
-}
-
 fn support_section_bar(app: &App) -> Vec<Span<'static>> {
     let sections = [
         SupportSection::Ping,
         SupportSection::Lan,
-        SupportSection::Sw,
         SupportSection::Disk,
         SupportSection::Boot,
         SupportSection::Notes,
@@ -872,7 +746,6 @@ fn draw_support_tab(f: &mut Frame, area: Rect, app: &mut App) {
     match app.support_section {
         SupportSection::Ping => draw_support_ping(f, chunks[1], app),
         SupportSection::Lan => draw_support_lan(f, chunks[1], app),
-        SupportSection::Sw => draw_support_sw(f, chunks[1], app),
         SupportSection::Disk => draw_support_disk(f, chunks[1], app),
         SupportSection::Boot => draw_support_boot(f, chunks[1], app),
         SupportSection::Notes => draw_support_notes(f, chunks[1], app),
@@ -882,8 +755,7 @@ fn draw_support_tab(f: &mut Frame, area: Rect, app: &mut App) {
     let help = match app.support_section {
         SupportSection::Ping => "[/] edita host | [r/Enter] roda série | [e] exporta CSV de evidência",
         SupportSection::Lan => "[r] revarre tabela ARP da LAN",
-        SupportSection::Sw => "[r] recarrega inventário SW + GPUs",
-        SupportSection::Disk => "[/] edita caminho | [r/Enter] calcula top pastas (pode demorar)",
+        SupportSection::Disk => "[/] edita caminho | [r/Enter] calcula em segundo plano | [Esc] cancela",
         SupportSection::Boot => "[r] recarrega Run keys + tarefas agendadas",
         SupportSection::Notes => "[/] busca | [v/Enter] lê nota | criação e edição pelo CLI `notes`",
     };
@@ -961,75 +833,29 @@ fn draw_support_lan(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_stateful_widget(table, area, &mut app.support_table_state);
 }
 
-fn draw_support_sw(f: &mut Frame, area: Rect, app: &mut App) {
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        "Instalações SolidWorks:",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )));
-    if app.sw_installs.is_empty() {
-        lines.push(Line::from("  <pressione [r] para carregar>"));
-    }
-    for inst in &app.sw_installs {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {} — {} ({})", inst.version_key, inst.install_dir, inst.install_date),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        ]));
-        for (prod, sn) in &inst.serials {
-            lines.push(Line::from(format!("    {:<22} {}", prod, sn)));
-        }
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "GPUs:",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )));
-    for gpu in &app.sw_gpus {
-        lines.push(Line::from(vec![
-            Span::raw(format!("  {} | driver {} | {} MB — ", gpu.name, gpu.driver_version, gpu.ram_mb)),
-            Span::styled(
-                crate::modules::support::certified_status(&gpu.name).to_string(),
-                Style::default().fg(Color::Cyan),
-            ),
-        ]));
-    }
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" SolidWorks ")
-        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
-    f.render_widget(Paragraph::new(lines).block(block), area);
-}
-
 fn draw_support_disk(f: &mut Frame, area: Rect, app: &mut App) {
+    use crate::modules::support::bytes_to_human;
+
+    // Largura fixa da barra proporcional (em caracteres)
+    const LARGURA_BARRA: usize = 24;
+
     let is_editing = app.input_mode == InputMode::SearchInput;
+    let estado = match (&app.disk_scan, app.disk_entries.is_empty()) {
+        (Some(scan), _) => format!("⏳ Calculando... {}s ([Esc] cancela)", scan.started.elapsed().as_secs()),
+        (None, true) => "Pressione [r] para calcular.".to_string(),
+        (None, false) => "Pronto. [r] recalcula.".to_string(),
+    };
     let path_line = format!(
-        "Caminho: {}   ([/] edita, [r] calcula)",
-        if is_editing { format!("{}█", app.disk_path) } else { app.disk_path.clone() }
+        "Caminho: {}   ([/] edita | [r] calcula) — {}",
+        if is_editing { format!("{}█", app.disk_path) } else { app.disk_path.clone() },
+        estado
     );
-    let header = Row::new(vec![
-        Span::styled("TAMANHO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("PASTA", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-    ])
-    .height(1)
-    .bottom_margin(1);
-    let rows: Vec<Row> = app
-        .disk_entries
-        .iter()
-        .map(|e| {
-            Row::new(vec![
-                Span::styled(
-                    crate::modules::support::bytes_to_human(e.bytes),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(e.path.display().to_string()),
-            ])
-        })
-        .collect();
+
     let inner = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(4)])
+        .constraints([Constraint::Length(3), Constraint::Length(3), Constraint::Min(4)])
         .split(area);
+
     let path_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1038,18 +864,125 @@ fn draw_support_disk(f: &mut Frame, area: Rect, app: &mut App) {
         Paragraph::new(path_line).style(Style::default().fg(Color::White)).block(path_block),
         inner[0],
     );
-    let table = Table::new(rows, [Constraint::Length(14), Constraint::Min(30)])
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(" Disco — Top Pastas ")
-                .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        )
-        .row_highlight_style(Style::default().bg(Color::Rgb(30, 45, 60)))
-        .highlight_symbol("▶ ");
-    f.render_stateful_widget(table, inner[1], &mut app.support_table_state);
+
+    // Ocupação da unidade que contém o caminho (gráfico de barra horizontal)
+    match &app.disk_volume {
+        Some(v) if v.total > 0 => {
+            let usado = v.total.saturating_sub(v.free);
+            let pct = (((usado as f64 / v.total as f64) * 100.0).round() as u16).min(100);
+            let cor = if pct >= 90 {
+                Color::Red
+            } else if pct >= 75 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            let gauge = Gauge::default()
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .title(format!(" Unidade {} ", v.mount))
+                        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                )
+                .gauge_style(Style::default().fg(cor).bg(Color::Rgb(35, 40, 50)))
+                .percent(pct)
+                .label(format!(
+                    "{} usados de {} ({}%) — {} livres",
+                    bytes_to_human(usado),
+                    bytes_to_human(v.total),
+                    pct,
+                    bytes_to_human(v.free)
+                ));
+            f.render_widget(gauge, inner[1]);
+        }
+        _ => {
+            let aviso = Paragraph::new("Ocupação da unidade: aparece depois de calcular ([r]).")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .title(" Unidade ")
+                        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                );
+            f.render_widget(aviso, inner[1]);
+        }
+    }
+
+    // Barras por pasta, proporcionais à maior. Cor pela fatia na soma listada.
+    let maior = app.disk_entries.iter().map(|e| e.bytes).max().unwrap_or(0).max(1);
+    let soma: u64 = app.disk_entries.iter().map(|e| e.bytes).sum();
+    let total_volume = app.disk_volume.as_ref().map(|v| v.total).unwrap_or(0);
+
+    let header = Row::new(vec![
+        Span::styled("TAMANHO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("PROPORÇÃO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("% LISTA", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("% UNIDADE", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("PASTA", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ])
+    .height(1)
+    .bottom_margin(1);
+
+    let rows: Vec<Row> = app
+        .disk_entries
+        .iter()
+        .map(|e| {
+            let barra = crate::texto::barra(e.bytes, maior, LARGURA_BARRA);
+            let fatia = e.bytes as f64 / soma.max(1) as f64;
+            let cor = if fatia >= 0.40 {
+                Color::Red
+            } else if fatia >= 0.15 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            let pct_unidade = if total_volume > 0 {
+                format!("{:.1}%", e.bytes as f64 / total_volume as f64 * 100.0)
+            } else {
+                "—".to_string()
+            };
+            Row::new(vec![
+                Span::styled(
+                    bytes_to_human(e.bytes),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(barra, Style::default().fg(cor)),
+                Span::raw(format!("{:.1}%", fatia * 100.0)),
+                Span::raw(pct_unidade),
+                Span::raw(e.path.display().to_string()),
+            ])
+        })
+        .collect();
+
+    let titulo = if app.disk_scan.is_some() {
+        " Disco — calculando em segundo plano... ".to_string()
+    } else {
+        format!(" Disco — Top {} pastas (soma listada: {}) ", app.disk_entries.len(), bytes_to_human(soma))
+    };
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Length((LARGURA_BARRA + 2) as u16),
+            Constraint::Length(9),
+            Constraint::Length(10),
+            Constraint::Min(20),
+        ],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(titulo)
+            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    )
+    .row_highlight_style(Style::default().bg(Color::Rgb(30, 45, 60)))
+    .highlight_symbol("▶ ");
+    f.render_stateful_widget(table, inner[2], &mut app.support_table_state);
 }
 
 fn draw_support_boot(f: &mut Frame, area: Rect, app: &mut App) {
@@ -1179,11 +1112,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         ActiveTab::Network => {
             "[/] Buscar | [p] Proto | [l] Listening | [o/n/d/s] Ordenar | [r] Atualizar | [k/Enter] Matar | [e] CSV | [E] JSON | [Tab] Aba | [?] Ajuda | [q] Sair"
         }
-        ActiveTab::Licenses => {
-            "[r] Atualizar lmstat | [Enter] Expandir feature | [f] Liberar checkout | [d] Diagnóstico SNL | [Tab] Aba | [?] Ajuda | [q] Sair"
+        ActiveTab::Files => {
+            "[↑↓] Mover | [Enter] Abrir | [Bksp] Subir | [Espaço] Marcar | [y] Copiar | [p] Colar | [n] Nova pasta | [/] Filtro | [:] Ir para | [s] Ordem | [.] Ocultos | [Esc] Cancelar | [q] Sair"
         }
         ActiveTab::Support => {
-            "[[ ]] Trocar seção | [r/Enter] Executar | [/] Editar campo | [v] Ler nota | [e] Exportar ping | [Tab] Aba | [?] Ajuda | [q] Sair"
+            "[[ ]] Trocar seção | [r/Enter] Executar | [Esc] Cancelar cálculo | [/] Editar campo | [v] Ler nota | [e] Exportar ping | [Tab] Aba | [?] Ajuda | [q] Sair"
         }
     };
 
@@ -1220,12 +1153,12 @@ fn draw_confirm_kill_modal(f: &mut Frame, area: Rect, pids: &[u32], has_critical
     if has_critical {
         text.push(Line::from(vec![
             Span::styled(
-                "🚨 ALERTA CRÍTICO: Foram selecionados processos protegidos do Windows!",
+                "🛡️ Processos protegidos do Windows foram REMOVIDOS desta lista",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
         ]));
         text.push(Line::from(
-            "Finalizar processos vitais pode provocar tela azul ou reinicialização imediata.",
+            "Eles não serão encerrados: finalizar processos vitais pode provocar tela azul.",
         ));
         text.push(Line::from(""));
     }
@@ -1241,44 +1174,6 @@ fn draw_confirm_kill_modal(f: &mut Frame, area: Rect, pids: &[u32], has_critical
         .border_type(BorderType::Double)
         .border_style(Style::default().fg(border_color))
         .title(" CONFIRMAÇÃO DE FINALIZAÇÃO (TASKKILL) ")
-        .title_alignment(Alignment::Center);
-
-    let paragraph = Paragraph::new(text)
-        .block(block)
-        .alignment(Alignment::Center);
-
-    f.render_widget(paragraph, modal_area);
-}
-
-fn draw_confirm_licfree_modal(f: &mut Frame, area: Rect, feature: &str, user: &str, host: &str) {
-    let modal_area = centered_rect(60, 35, area);
-    f.render_widget(Clear, modal_area);
-
-    let text = vec![
-        Line::from(vec![
-            Span::styled(
-                "Liberar checkout de licença FlexNet?",
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(format!("Feature: {}", feature)),
-        Line::from(format!("Usuário: {} @ {}", user, host)),
-        Line::from(""),
-        Line::from("O usuário perderá a licença (salve o trabalho dele antes, se possível)."),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" [Y / Enter] SIM, LIBERAR ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw("    "),
-            Span::styled(" [N / ESC] CANCELAR ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        ]),
-    ];
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(" LIBERAR LICENÇA (LMREMOVE) ")
         .title_alignment(Alignment::Center);
 
     let paragraph = Paragraph::new(text)
@@ -1418,15 +1313,22 @@ fn draw_help_modal(f: &mut Frame, area: Rect) {
         Line::from("  e             - Exportar lista filtrada para CSV"),
         Line::from("  E             - Exportar lista filtrada para JSON"),
         Line::from(""),
-        Line::from(Span::styled("Aba 5: Licenças FlexNet/SNL:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
-        Line::from("  r             - Atualizar consulta lmstat"),
-        Line::from("  Enter / Espaço- Expandir / recolher checkouts da feature"),
-        Line::from("  f / Delete    - Liberar checkout selecionado (com confirmação)"),
-        Line::from("  d             - Rodar diagnóstico SNL (serviço, portas, registro, ping)"),
+        Line::from(Span::styled("Aba 5: Arquivos:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from("  ↑↓ / j k      - Mover o cursor (PgUp, PgDn, g, G também)"),
+        Line::from("  Enter / →     - Entrar na pasta      Backspace / ← - Subir (na raiz, mostra unidades)"),
+        Line::from("  :             - Digitar um caminho para ir até ele"),
+        Line::from("  /             - Filtrar por texto      . - Mostrar/ocultar itens ocultos"),
+        Line::from("  s             - Trocar ordenação (nome, tamanho, data)"),
+        Line::from("  Espaço        - Marcar/desmarcar item e descer"),
+        Line::from("  y             - Guardar marcados (ou o item do cursor) para copiar"),
+        Line::from("  p             - Colar na pasta atual (mostra o plano antes de copiar)"),
+        Line::from("  n             - Criar nova pasta na pasta atual"),
+        Line::from("  Esc           - Cancelar a cópia em andamento, ou limpar marcas e filtro"),
         Line::from(""),
         Line::from(Span::styled("Aba 6: Suporte Técnico:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
-        Line::from("  [ / ]         - Alternar seção (Ping, LAN, SW, Disco, Boot, Notas)"),
-        Line::from("  r / Enter     - Executar ação da seção"),
+        Line::from("  [ / ]         - Alternar seção (Ping, LAN, Disco, Boot, Notas)"),
+        Line::from("  r / Enter     - Executar ação da seção (Disco: calcula em segundo plano)"),
+        Line::from("  Esc           - Cancelar o cálculo de disco em andamento"),
         Line::from("  /             - Editar host do ping, caminho do disco ou busca de notas"),
         Line::from("  v             - Ler nota selecionada"),
         Line::from("  e             - Exportar evidência de ping (CSV, seção Latência)"),
@@ -1448,7 +1350,7 @@ fn draw_help_modal(f: &mut Frame, area: Rect) {
     f.render_widget(paragraph, modal_area);
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+pub(super) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

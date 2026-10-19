@@ -1,3 +1,4 @@
+use crate::modules::top::ProcessResourceInfo;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,9 +28,33 @@ pub struct ProcessItem {
     pub disk_read_bytes_sec: u64,
     #[serde(default)]
     pub disk_write_bytes_sec: u64,
+    #[serde(default)]
+    pub cmd_line: String,
 }
 
 impl ProcessItem {
+    /// Converte um processo coletado do sistema, já com a classificação de proteção
+    pub fn from_resource(info: &ProcessResourceInfo, is_protected: bool, selected: bool) -> Self {
+        Self {
+            pid: info.pid,
+            name: info.name.clone(),
+            cpu_pct: info.cpu_pct,
+            memory_bytes: info.memory_bytes,
+            is_protected,
+            selected,
+            exe_path: info.exe_path.clone(),
+            user: info.user.clone(),
+            start_time: info.start_time,
+            threads: info.threads,
+            parent_pid: info.parent_pid,
+            gpu_pct: info.gpu_pct,
+            vram_bytes: info.vram_bytes,
+            disk_read_bytes_sec: info.disk_read_bytes_sec,
+            disk_write_bytes_sec: info.disk_write_bytes_sec,
+            cmd_line: info.cmd_line.clone(),
+        }
+    }
+
     pub fn memory_mb(&self) -> f64 {
         self.memory_bytes as f64 / (1024.0 * 1024.0)
     }

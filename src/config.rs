@@ -14,13 +14,9 @@ pub struct AppConfig {
     #[serde(default)]
     pub security: SecurityConfig,
     #[serde(default)]
-    pub licensing: LicensingConfig,
-    #[serde(default)]
     pub notes: NotesConfig,
     #[serde(default)]
     pub netdiag: NetdiagConfig,
-    #[serde(default)]
-    pub solidworks: SolidworksConfig,
     #[serde(default)]
     pub support: SupportConfig,
 }
@@ -32,10 +28,8 @@ impl Default for AppConfig {
             vmware: VmwareConfig::default(),
             metrics: MetricsConfig::default(),
             security: SecurityConfig::default(),
-            licensing: LicensingConfig::default(),
             notes: NotesConfig::default(),
             netdiag: NetdiagConfig::default(),
-            solidworks: SolidworksConfig::default(),
             support: SupportConfig::default(),
         }
     }
@@ -192,45 +186,6 @@ impl Default for SecurityConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LicensingConfig {
-    /// Caminho explícito para o lmutil.exe (autodetecta SNL/PATH se vazio)
-    #[serde(default)]
-    pub lmutil_path: Option<String>,
-    /// Servidor padrão `porta@host` (ex: 25734@lic-server)
-    #[serde(default)]
-    pub default_server: Option<String>,
-    /// Alerta quando alguma feature ficar com menos livres que isso
-    #[serde(default = "default_min_free")]
-    pub min_free_threshold: u32,
-    /// Porta lmgrd padrão para diagnóstico
-    #[serde(default = "default_lm_port")]
-    pub lm_port: u16,
-    /// Porta do vendor daemon (sw_d), se fixa por firewall
-    #[serde(default)]
-    pub vendor_port: Option<u16>,
-}
-
-fn default_min_free() -> u32 {
-    2
-}
-
-fn default_lm_port() -> u16 {
-    25734
-}
-
-impl Default for LicensingConfig {
-    fn default() -> Self {
-        Self {
-            lmutil_path: None,
-            default_server: None,
-            min_free_threshold: default_min_free(),
-            lm_port: default_lm_port(),
-            vendor_port: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotesConfig {
     /// Diretório das notas (padrão: ./notes). Suporta `~` e var. de ambiente.
     #[serde(default)]
@@ -289,25 +244,6 @@ impl Default for NetdiagConfig {
             ping_count: default_ping_count(),
             probe_timeout_ms: default_probe_timeout(),
             sweep_concurrency: default_sweep_concurrency(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SolidworksConfig {
-    /// Caminho do debug log do SNL para monitor de borrow (autodetecta se vazio)
-    #[serde(default)]
-    pub snl_log_path: Option<String>,
-    /// Caminhos extras de limpeza (além de swx*/sld*.tmp no %TEMP%)
-    #[serde(default)]
-    pub clean_extra_paths: Vec<String>,
-}
-
-impl Default for SolidworksConfig {
-    fn default() -> Self {
-        Self {
-            snl_log_path: None,
-            clean_extra_paths: Vec::new(),
         }
     }
 }

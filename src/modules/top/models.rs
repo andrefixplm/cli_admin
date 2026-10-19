@@ -58,6 +58,9 @@ pub struct ProcessResourceInfo {
     pub threads: u32,
     #[serde(default)]
     pub parent_pid: Option<u32>,
+    /// Linha de comando completa que iniciou o processo (vazia sem privilégios)
+    #[serde(default)]
+    pub cmd_line: String,
 }
 
 impl ProcessResourceInfo {

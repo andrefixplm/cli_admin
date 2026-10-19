@@ -2,10 +2,11 @@ use crate::config::{AppConfig, VmConfigEntry};
 use crate::modules::net::{
     self, NetConnection, NetProtoFilter, NetSort, filter_connections, sort_connections,
 };
-use crate::modules::process::{ProcessFilter, ProcessItem, ProcessKiller, ProcessShield};
+use crate::modules::process::killer::separar_protegidos;
+use crate::modules::process::{export, ProcessFilter, ProcessItem, ProcessKiller, ProcessShield};
 use crate::modules::support::{
-    self, ArpEntry, BootItem, DiagCheck, DiskEntry, GpuAdapter, LicFeature, LicUser, NoteMeta,
-    PingStats, SwInstall,
+    self, ArpEntry, BootItem, DiskEntry, NoteMeta,
+    PingStats,
 };
 use crate::modules::top::{
     GpuPdhCollector, NvidiaCollector, NvidiaGpuInfo, ProcessResourceInfo, SortField,
@@ -15,6 +16,8 @@ use crate::modules::vmware::{StartMode, StopMode, VmDiscovery, VmInfo, VmwareCli
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use tracing::{error, info};
 
@@ -24,7 +27,7 @@ pub enum ActiveTab {
     TopMetrics = 1,
     ProcessManager = 2,
     Network = 3,
-    Licenses = 4,
+    Files = 4,
     Support = 5,
 }
 
@@ -34,8 +37,8 @@ impl ActiveTab {
             ActiveTab::Vmware => ActiveTab::TopMetrics,
             ActiveTab::TopMetrics => ActiveTab::ProcessManager,
             ActiveTab::ProcessManager => ActiveTab::Network,
-            ActiveTab::Network => ActiveTab::Licenses,
-            ActiveTab::Licenses => ActiveTab::Support,
+            ActiveTab::Network => ActiveTab::Files,
+            ActiveTab::Files => ActiveTab::Support,
             ActiveTab::Support => ActiveTab::Vmware,
         }
     }
@@ -46,8 +49,8 @@ impl ActiveTab {
             ActiveTab::TopMetrics => ActiveTab::Vmware,
             ActiveTab::ProcessManager => ActiveTab::TopMetrics,
             ActiveTab::Network => ActiveTab::ProcessManager,
-            ActiveTab::Licenses => ActiveTab::Network,
-            ActiveTab::Support => ActiveTab::Licenses,
+            ActiveTab::Files => ActiveTab::Network,
+            ActiveTab::Support => ActiveTab::Files,
         }
     }
 }
@@ -57,7 +60,6 @@ impl ActiveTab {
 pub enum SupportSection {
     Ping,
     Lan,
-    Sw,
     Disk,
     Boot,
     Notes,
@@ -68,7 +70,6 @@ impl SupportSection {
         match self {
             SupportSection::Ping => "Latência/Ping",
             SupportSection::Lan => "Mapa da LAN",
-            SupportSection::Sw => "SolidWorks",
             SupportSection::Disk => "Disco",
             SupportSection::Boot => "Boot/Login",
             SupportSection::Notes => "Notas",
@@ -78,8 +79,7 @@ impl SupportSection {
     pub fn next(&self) -> Self {
         match self {
             SupportSection::Ping => SupportSection::Lan,
-            SupportSection::Lan => SupportSection::Sw,
-            SupportSection::Sw => SupportSection::Disk,
+            SupportSection::Lan => SupportSection::Disk,
             SupportSection::Disk => SupportSection::Boot,
             SupportSection::Boot => SupportSection::Notes,
             SupportSection::Notes => SupportSection::Ping,
@@ -90,19 +90,11 @@ impl SupportSection {
         match self {
             SupportSection::Ping => SupportSection::Notes,
             SupportSection::Lan => SupportSection::Ping,
-            SupportSection::Sw => SupportSection::Lan,
-            SupportSection::Disk => SupportSection::Sw,
+            SupportSection::Disk => SupportSection::Lan,
             SupportSection::Boot => SupportSection::Disk,
             SupportSection::Notes => SupportSection::Boot,
         }
     }
-}
-
-/// Linha da tabela de licenças: feature expansível + seus checkouts.
-#[derive(Debug, Clone)]
-pub enum LicRow {
-    Feature { index: usize, expanded: bool },
-    User { user: LicUser },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,10 +128,6 @@ pub enum ModalState {
         pids: Vec<u32>,
         has_critical: bool,
     },
-    ConfirmLicFree {
-        feature: String,
-        user: LicUser,
-    },
     CreateSnapshot {
         vm_index: usize,
         snapshot_name: String,
@@ -152,6 +140,15 @@ pub enum ModalState {
     Help,
 }
 
+/// Cálculo de tamanho de pastas em segundo plano. Só existe enquanto o usuário
+/// o pediu por tecla; a interface continua navegável e consulta o resultado a cada tick.
+pub struct DiskScan {
+    pub root: PathBuf,
+    pub started: Instant,
+    cancel: Arc<AtomicBool>,
+    rx: mpsc::Receiver<(Vec<DiskEntry>, Option<support::VolumeInfo>)>,
+}
+
 pub struct App {
     pub config: AppConfig,
     pub config_path: PathBuf,
@@ -159,6 +156,9 @@ pub struct App {
     pub input_mode: InputMode,
     pub modal: ModalState,
     pub status_message: Option<(String, Instant)>,
+
+    // Arquivos (explorador de pastas)
+    pub fm: super::fm::FmState,
 
     // VMware Tab State
     pub vm_client: VmwareClient,
@@ -196,14 +196,6 @@ pub struct App {
     pub only_listening: bool,
     pub net_table_state: TableState,
 
-    // Licenses Tab State (FlexNet/SNL)
-    pub lic_features: Vec<LicFeature>,
-    pub lic_rows: Vec<LicRow>,
-    pub selected_lic_index: usize,
-    pub lic_table_state: TableState,
-    pub lic_lmutil: Option<PathBuf>,
-    pub lic_diag: Vec<DiagCheck>,
-
     // Support Tab State
     pub support_section: SupportSection,
     pub support_table_state: TableState,
@@ -214,12 +206,11 @@ pub struct App {
     pub ping_history: Vec<u32>,
     // LAN
     pub arp_entries: Vec<ArpEntry>,
-    // SolidWorks
-    pub sw_installs: Vec<SwInstall>,
-    pub sw_gpus: Vec<GpuAdapter>,
     // Disco
     pub disk_path: String,
     pub disk_entries: Vec<DiskEntry>,
+    pub disk_scan: Option<DiskScan>,
+    pub disk_volume: Option<support::VolumeInfo>,
     // Boot
     pub boot_items: Vec<BootItem>,
     // Notas
@@ -279,6 +270,10 @@ impl App {
             active_tab: ActiveTab::Vmware,
             input_mode: InputMode::Normal,
             modal: ModalState::None,
+            fm: super::fm::FmState::novo(
+                dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")),
+                Some(PathBuf::from(crate::audit::ARQUIVO_PADRAO)),
+            ),
             status_message: Some((
                 "Sistema iniciado com sucesso. Pressione [?] para ajuda.".to_string(),
                 Instant::now(),
@@ -314,12 +309,6 @@ impl App {
             net_proto_filter: NetProtoFilter::All,
             only_listening: false,
             net_table_state: TableState::default(),
-            lic_features: Vec::new(),
-            lic_rows: Vec::new(),
-            selected_lic_index: 0,
-            lic_table_state: TableState::default(),
-            lic_lmutil: support::discover_lmutil(config.licensing.lmutil_path.as_deref()),
-            lic_diag: Vec::new(),
             support_section: SupportSection::Ping,
             support_table_state: TableState::default(),
             selected_support_index: 0,
@@ -327,10 +316,10 @@ impl App {
             ping_stats: None,
             ping_history: Vec::new(),
             arp_entries: Vec::new(),
-            sw_installs: Vec::new(),
-            sw_gpus: Vec::new(),
             disk_path: String::from("."),
             disk_entries: Vec::new(),
+            disk_scan: None,
+            disk_volume: None,
             boot_items: Vec::new(),
             support_notes: Vec::new(),
             note_query: String::new(),
@@ -402,23 +391,7 @@ impl App {
             let is_protected = self.shield.is_protected(&proc.name, proc.pid);
             let selected = selected_pids.contains(&proc.pid);
 
-            items.push(ProcessItem {
-                pid: proc.pid,
-                name: proc.name.clone(),
-                cpu_pct: proc.cpu_pct,
-                memory_bytes: proc.memory_bytes,
-                is_protected,
-                selected,
-                exe_path: proc.exe_path.clone(),
-                user: proc.user.clone(),
-                start_time: proc.start_time,
-                threads: proc.threads,
-                parent_pid: proc.parent_pid,
-                gpu_pct: proc.gpu_pct,
-                vram_bytes: proc.vram_bytes,
-                disk_read_bytes_sec: proc.disk_read_bytes_sec,
-                disk_write_bytes_sec: proc.disk_write_bytes_sec,
-            });
+            items.push(ProcessItem::from_resource(proc, is_protected, selected));
         }
 
         // Ordenar conforme a escolha ativa da aba (persiste entre ticks)
@@ -490,58 +463,10 @@ impl App {
         self.net_table_state.select(Some(self.selected_net_index));
     }
 
-    /// Recarrega features/uso de licenças via lmstat.
-    pub async fn refresh_licenses(&mut self) {
-        let lmutil = match &self.lic_lmutil {
-            Some(p) => p.clone(),
-            None => {
-                self.set_status("lmutil.exe não encontrado — configure licensing.lmutil_path.");
-                return;
-            }
-        };
-        let server = self.config.licensing.default_server.clone();
-        match support::query_all(&lmutil, server.as_deref()).await {
-            Ok(features) => {
-                let total_users: usize = features.iter().map(|f| f.users.len()).sum();
-                self.set_status(format!(
-                    "{} feature(s), {} checkout(s) ativos.",
-                    features.len(),
-                    total_users
-                ));
-                self.lic_features = features;
-                self.build_lic_rows();
-            }
-            Err(e) => self.set_status(format!("Erro no lmstat: {}", e)),
-        }
-    }
-
-    fn build_lic_rows(&mut self) {
-        let mut rows = Vec::new();
-        for (index, f) in self.lic_features.iter().enumerate() {
-            let expanded = self
-                .lic_rows
-                .iter()
-                .any(|r| matches!(r, LicRow::Feature { index: i, expanded: true } if *i == index));
-            // Preserva expansão anterior pelo nome da feature
-            rows.push(LicRow::Feature { index, expanded });
-            if expanded {
-                for u in &f.users {
-                    rows.push(LicRow::User { user: u.clone() });
-                }
-            }
-        }
-        self.lic_rows = rows;
-        if self.selected_lic_index >= self.lic_rows.len() && !self.lic_rows.is_empty() {
-            self.selected_lic_index = self.lic_rows.len() - 1;
-        }
-        self.lic_table_state.select(Some(self.selected_lic_index));
-    }
-
     fn support_list_len(&self) -> usize {
         match self.support_section {
             SupportSection::Ping => 0,
             SupportSection::Lan => self.arp_entries.len(),
-            SupportSection::Sw => self.sw_installs.len() + self.sw_gpus.len(),
             SupportSection::Disk => self.disk_entries.len(),
             SupportSection::Boot => self.boot_items.len(),
             SupportSection::Notes => self.support_notes.len(),
@@ -569,17 +494,11 @@ impl App {
                 self.arp_entries = support::read_arp_table();
                 self.set_status(format!("{} entrada(s) ARP.", self.arp_entries.len()));
             }
-            SupportSection::Sw => {
-                self.sw_installs = support::sw_installations();
-                self.sw_gpus = support::gpu_adapters().await;
-                self.set_status(format!(
-                    "{} instalação(ões) SW, {} GPU(s).",
-                    self.sw_installs.len(),
-                    self.sw_gpus.len()
-                ));
-            }
             SupportSection::Disk => {
-                self.run_disk_top();
+                // Custo alto: só calcula quando o usuário pedir ([r]), nunca ao entrar na seção
+                if self.disk_scan.is_none() && self.disk_entries.is_empty() {
+                    self.set_status("Disco: pressione [r] para calcular o tamanho das pastas.");
+                }
             }
             SupportSection::Boot => {
                 let mut items = support::boot_run_keys();
@@ -594,15 +513,84 @@ impl App {
         self.clamp_support_selection();
     }
 
-    fn run_disk_top(&mut self) {
+    /// Inicia o cálculo de tamanho das pastas em segundo plano. Não bloqueia a interface.
+    fn start_disk_scan(&mut self) {
+        if self.disk_scan.is_some() {
+            self.set_status("Já existe um cálculo em andamento ([Esc] cancela).");
+            return;
+        }
         let root = PathBuf::from(&self.disk_path);
-        self.set_status(format!("Calculando tamanhos em {} ...", root.display()));
-        self.disk_entries = support::disk_top(&root, self.config.support.disk_top_n);
-        self.set_status(format!(
-            "Top {} em {} calculado(s).",
-            self.disk_entries.len(),
-            root.display()
-        ));
+        if !root.is_dir() {
+            self.set_status(format!("Caminho inválido ou não é pasta: {}", root.display()));
+            return;
+        }
+        let n = self.config.support.disk_top_n;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let (cancel_t, root_t) = (Arc::clone(&cancel), root.clone());
+        std::thread::spawn(move || {
+            // None = cancelado: não envia nada e o receptor vê o canal fechado
+            // O volume também é consultado aqui: nunca na thread da interface
+            let volume = support::volume_info(&root_t);
+            if let Some(entries) = support::disk_top_cancelavel(&root_t, n, &cancel_t) {
+                let _ = tx.send((entries, volume));
+            }
+        });
+        self.disk_entries.clear();
+        self.set_status(format!("Calculando tamanhos em {} ... ([Esc] cancela)", root.display()));
+        self.disk_scan = Some(DiskScan { root, started: Instant::now(), cancel, rx });
+    }
+
+    /// Cancela o cálculo em andamento. Devolve `true` se havia um.
+    fn cancel_disk_scan(&mut self) -> bool {
+        match self.disk_scan.take() {
+            Some(scan) => {
+                scan.cancel.store(true, Ordering::Relaxed);
+                self.set_status("Cálculo de disco cancelado.");
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Consulta o resultado do cálculo em segundo plano (chamado a cada tick).
+    fn poll_disk_scan(&mut self) {
+        let resultado = match &self.disk_scan {
+            Some(scan) => scan.rx.try_recv(),
+            None => return,
+        };
+        match resultado {
+            Ok((entries, volume)) => {
+                self.disk_volume = volume;
+                if let Some(scan) = self.disk_scan.take() {
+                    self.set_status(format!(
+                        "Top {} em {} calculado em {:.1}s.",
+                        entries.len(),
+                        scan.root.display(),
+                        scan.started.elapsed().as_secs_f32()
+                    ));
+                }
+                self.disk_entries = entries;
+                self.clamp_support_selection();
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            // Thread terminou sem enviar (cancelada): limpa o estado
+            Err(mpsc::TryRecvError::Disconnected) => self.disk_scan = None,
+        }
+    }
+
+    /// Consulta tudo o que roda em segundo plano. Chamado a cada tick da interface (150 ms).
+    pub fn poll_background(&mut self) {
+        self.poll_disk_scan();
+        self.fm.poll();
+        self.drenar_mensagem_fm();
+    }
+
+    /// Leva a mensagem curta do explorador para a barra de status do programa.
+    fn drenar_mensagem_fm(&mut self) {
+        if let Some(m) = self.fm.mensagem.take() {
+            self.set_status(m);
+        }
     }
 
     fn reload_notes(&mut self) {
@@ -632,6 +620,9 @@ impl App {
                 self.status_message = None;
             }
         }
+
+        // Resultado do cálculo de disco em segundo plano (se houver)
+        self.poll_disk_scan();
 
         // Atualizar métricas continuamente
         self.refresh_metrics().await;
@@ -721,21 +712,6 @@ impl App {
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                         self.modal = ModalState::None;
                         self.set_status("Operação de cancelada pelo usuário.");
-                    }
-                    _ => {}
-                }
-                return false;
-            }
-            ModalState::ConfirmLicFree { feature, user } => {
-                match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                        let (f, u) = (feature.clone(), user.clone());
-                        self.modal = ModalState::None;
-                        self.execute_lic_free(&f, &u).await;
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                        self.modal = ModalState::None;
-                        self.set_status("Liberação de licença cancelada.");
                     }
                     _ => {}
                 }
@@ -834,6 +810,13 @@ impl App {
             return false;
         }
 
+        // A aba Arquivos, com campo de texto ou modal aberto, recebe todas as teclas
+        if self.active_tab == ActiveTab::Files && self.fm.captura_teclado() {
+            self.fm.tecla(key);
+            self.drenar_mensagem_fm();
+            return false;
+        }
+
         // Atalhos globais
         match key.code {
             KeyCode::Char('q') => return true,
@@ -866,7 +849,7 @@ impl App {
                 return false;
             }
             KeyCode::Char('5') => {
-                self.active_tab = ActiveTab::Licenses;
+                self.active_tab = ActiveTab::Files;
                 return false;
             }
             KeyCode::Char('6') => {
@@ -882,7 +865,10 @@ impl App {
             ActiveTab::TopMetrics => self.handle_top_key(key).await,
             ActiveTab::ProcessManager => self.handle_process_key(key).await,
             ActiveTab::Network => self.handle_network_key(key).await,
-            ActiveTab::Licenses => self.handle_licenses_key(key).await,
+            ActiveTab::Files => {
+                self.fm.tecla(key);
+                self.drenar_mensagem_fm();
+            }
             ActiveTab::Support => self.handle_support_key(key).await,
         }
 
@@ -1260,114 +1246,6 @@ impl App {
         Ok(filename)
     }
 
-    async fn handle_licenses_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
-            KeyCode::Down | KeyCode::Char('j') => self.select_next(),
-            KeyCode::PageUp => self.page_up(),
-            KeyCode::PageDown => self.page_down(),
-            // Atualizar lmstat
-            KeyCode::Char('r') | KeyCode::Char('R') => {
-                self.set_status("Consultando lmstat...");
-                self.refresh_licenses().await;
-            }
-            // Expandir/recolher checkouts da feature (Enter ou Espaço)
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                if let Some(LicRow::Feature { index, .. }) =
-                    self.lic_rows.get(self.selected_lic_index).cloned()
-                {
-                    let name = self
-                        .lic_features
-                        .get(index)
-                        .map(|f| f.name.clone())
-                        .unwrap_or_default();
-                    // Alterna: reconstroi linhas com a expansão invertida
-                    let mut expanded: std::collections::HashSet<usize> = self
-                        .lic_rows
-                        .iter()
-                        .filter_map(|r| match r {
-                            LicRow::Feature { index: i, expanded: true } => Some(*i),
-                            _ => None,
-                        })
-                        .collect();
-                    if !expanded.insert(index) {
-                        expanded.remove(&index);
-                    }
-                    let mut rows = Vec::new();
-                    for (i, f) in self.lic_features.iter().enumerate() {
-                        let exp = expanded.contains(&i);
-                        rows.push(LicRow::Feature { index: i, expanded: exp });
-                        if exp {
-                            for u in &f.users {
-                                rows.push(LicRow::User { user: u.clone() });
-                            }
-                        }
-                    }
-                    self.lic_rows = rows;
-                    self.lic_table_state.select(Some(self.selected_lic_index));
-                    self.set_status(format!("Feature '{}': {}", name, if expanded.contains(&index) { "expandida" } else { "recolhida" }));
-                }
-            }
-            // Diagnóstico SNL (resultado no painel de detalhes)
-            KeyCode::Char('d') | KeyCode::Char('D') => {
-                let server = self
-                    .config
-                    .licensing
-                    .default_server
-                    .clone()
-                    .and_then(|s| s.rsplit_once('@').map(|(_, h)| h.to_string()))
-                    .unwrap_or_else(|| "localhost".to_string());
-                self.set_status(format!("Diagnosticando {} ...", server));
-                self.lic_diag = support::diagnose_snl(
-                    &server,
-                    self.config.licensing.lm_port,
-                    self.config.licensing.vendor_port,
-                )
-                .await;
-                let fails = self.lic_diag.iter().filter(|c| !c.ok).count();
-                self.set_status(format!("Diagnóstico: {} falha(s).", fails));
-            }
-            // Liberar checkout selecionado (linha de usuário)
-            KeyCode::Char('f') | KeyCode::Char('F') | KeyCode::Delete => {
-                if let Some(LicRow::User { user }) = self.lic_rows.get(self.selected_lic_index).cloned() {
-                    // Descobre a feature dona procurando a Feature row acima
-                    let mut feature = String::new();
-                    for row in self.lic_rows[..self.selected_lic_index].iter().rev() {
-                        if let LicRow::Feature { index, .. } = row {
-                            feature = self.lic_features.get(*index).map(|f| f.name.clone()).unwrap_or_default();
-                            break;
-                        }
-                    }
-                    if feature.is_empty() {
-                        self.set_status("Feature do checkout não identificada.");
-                    } else {
-                        self.modal = ModalState::ConfirmLicFree { feature, user };
-                    }
-                } else {
-                    self.set_status("Selecione uma linha de usuário (expanda a feature com Enter).");
-                }
-            }
-            _ => {}
-        }
-    }
-
-    async fn execute_lic_free(&mut self, feature: &str, user: &LicUser) {
-        let lmutil = match &self.lic_lmutil {
-            Some(p) => p.clone(),
-            None => {
-                self.set_status("lmutil.exe não encontrado.");
-                return;
-            }
-        };
-        let server = self.config.licensing.default_server.clone();
-        self.set_status(format!("Liberando '{}' de {} @ {} ...", feature, user.user, user.host));
-        match support::free_checkout(&lmutil, server.as_deref(), feature, user).await {
-            Ok(_) => self.set_status(format!("Checkout '{}' de {} liberado.", feature, user.user)),
-            Err(e) => self.set_status(format!("Erro ao liberar: {}", e)),
-        }
-        self.refresh_licenses().await;
-    }
-
     async fn handle_support_key(&mut self, key: KeyEvent) {
         match key.code {
             // Alternar seção
@@ -1396,11 +1274,17 @@ impl App {
                     self.set_status("Esta seção não tem campo editável.");
                 }
             },
+            // Cancelar cálculo de disco em andamento
+            KeyCode::Esc => {
+                if self.support_section == SupportSection::Disk {
+                    self.cancel_disk_scan();
+                }
+            }
             // Executar/atualizar ação da seção
             KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Enter => {
                 match self.support_section {
                     SupportSection::Ping => self.run_ping_series().await,
-                    SupportSection::Disk => self.run_disk_top(),
+                    SupportSection::Disk => self.start_disk_scan(),
                     _ => self.refresh_support_section().await,
                 }
                 self.clamp_support_selection();
@@ -1481,12 +1365,7 @@ impl App {
                     self.net_table_state.select(Some(self.selected_net_index));
                 }
             }
-            ActiveTab::Licenses => {
-                if !self.lic_rows.is_empty() && self.selected_lic_index < self.lic_rows.len() - 1 {
-                    self.selected_lic_index += 1;
-                    self.lic_table_state.select(Some(self.selected_lic_index));
-                }
-            }
+            ActiveTab::Files => {}
             ActiveTab::Support => {
                 if self.selected_support_index + 1 < self.support_list_len() {
                     self.selected_support_index += 1;
@@ -1521,12 +1400,7 @@ impl App {
                     self.net_table_state.select(Some(self.selected_net_index));
                 }
             }
-            ActiveTab::Licenses => {
-                if self.selected_lic_index > 0 {
-                    self.selected_lic_index -= 1;
-                    self.lic_table_state.select(Some(self.selected_lic_index));
-                }
-            }
+            ActiveTab::Files => {}
             ActiveTab::Support => {
                 if self.selected_support_index > 0 {
                     self.selected_support_index -= 1;
@@ -1550,37 +1424,9 @@ impl App {
 
     /// Exporta a lista de processos filtrados para um arquivo JSON ou CSV
     pub fn export_processes(&self, format: &str) -> Result<String, String> {
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let filename = format!("processes_{}.{}", timestamp, format);
-
-        let content = match format {
-            "json" => {
-                serde_json::to_string_pretty(&self.filtered_processes)
-                    .map_err(|e| format!("Erro ao serializar JSON: {}", e))?
-            }
-            "csv" => {
-                let mut csv = String::from("PID,Nome,CPU%,Memoria_MB,Path,Usuario,Uptime,Protegido\n");
-                for proc in &self.filtered_processes {
-                    csv.push_str(&format!(
-                        "{},{},{:.1},{:.1},{},{},{},{}\n",
-                        proc.pid,
-                        proc.name.replace(',', ";"),
-                        proc.cpu_pct,
-                        proc.memory_mb(),
-                        proc.exe_path.replace(',', ";"),
-                        proc.user.replace(',', ";"),
-                        proc.formatted_uptime(),
-                        if proc.is_protected { "SIM" } else { "NAO" }
-                    ));
-                }
-                csv
-            }
-            _ => return Err(format!("Formato '{}' não suportado. Use 'json' ou 'csv'.", format)),
-        };
-
-        std::fs::write(&filename, &content)
-            .map_err(|e| format!("Erro ao escrever arquivo: {}", e))?;
-
+        let filename = export::default_filename(format);
+        let content = export::render(&self.filtered_processes, format)?;
+        export::write_file(&filename, &content)?;
         Ok(filename)
     }
 
@@ -1604,26 +1450,51 @@ impl App {
             return;
         }
 
-        // Verificar se há processos protegidos selecionados
-        let mut has_critical = false;
-        for &pid in &pids_to_kill {
-            if let Some(proc) = self.all_processes.iter().find(|p| p.pid == pid) {
-                if proc.is_protected {
-                    has_critical = true;
-                    break;
-                }
-            }
+        // Escudo (A-02): protegidos saem da lista; a confirmação mostra só os elegíveis
+        let (liberados, bloqueados) = self.separar_protegidos_por_pid(&pids_to_kill);
+        if liberados.is_empty() {
+            self.set_status(format!(
+                "Nada a encerrar: {} processo(s) protegido(s) ignorado(s).",
+                bloqueados.len()
+            ));
+            return;
         }
 
         self.modal = ModalState::ConfirmKill {
-            pids: pids_to_kill,
-            has_critical,
+            pids: liberados,
+            has_critical: !bloqueados.is_empty(),
         };
     }
 
+    /// Separa PIDs elegíveis dos protegidos. PID que não está mais na lista (processo já
+    /// terminou) é tratado como não elegível: na dúvida, não encerra.
+    fn separar_protegidos_por_pid(&self, pids: &[u32]) -> (Vec<u32>, Vec<u32>) {
+        let alvos: Vec<(u32, bool)> = pids
+            .iter()
+            .map(|&pid| {
+                let protegido = self
+                    .all_processes
+                    .iter()
+                    .find(|p| p.pid == pid)
+                    .map_or(true, |p| p.is_protected);
+                (pid, protegido)
+            })
+            .collect();
+        separar_protegidos(&alvos)
+    }
+
     async fn execute_kill_pids(&mut self, pids: &[u32]) {
-        self.set_status(format!("Finalizando {} processo(s)...", pids.len()));
-        let results = ProcessKiller::kill_batch(pids, true, true).await;
+        // Segunda checagem, no ponto que executa (L-SEG-07): nada protegido chega ao taskkill
+        let (liberados, bloqueados) = self.separar_protegidos_por_pid(pids);
+        if !bloqueados.is_empty() {
+            self.set_status(format!("{} processo(s) protegido(s) ignorado(s).", bloqueados.len()));
+        }
+        if liberados.is_empty() {
+            return;
+        }
+
+        self.set_status(format!("Finalizando {} processo(s)...", liberados.len()));
+        let results = ProcessKiller::kill_batch(&liberados, true, true).await;
 
         let mut success_count = 0;
         for (pid, res) in &results {

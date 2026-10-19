@@ -1,9 +1,14 @@
 [package]
 name = "cli_admin"
-version = "1.0.0"
+version = "3.0.0"
 edition = "2024"
 authors = ["Andre PLM"]
 description = "CLI & TUI modular administrator for VMware Workstation, System TOP metrics and Process Killer"
+
+# O pacote continua "cli_admin" (lib e imports); só o executável recebe o nome V3.
+[[bin]]
+name = "cli_admin_v3"
+path = "src/main.rs"
 
 [dependencies]
 # CLI & Command line arguments
@@ -45,4 +50,5 @@ windows = { version = "0.58", features = [
     "Win32_System_Services",
     "Win32_Security",
     "Win32_NetworkManagement_IpHelper",
+    "Win32_Storage_FileSystem",
 ] }

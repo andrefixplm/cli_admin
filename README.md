@@ -71,10 +71,11 @@ A aplicação opera em dois modos distintos:
 - `C`: Ordenar processos por **CPU %** (maior primeiro)
 - `M`: Ordenar processos por **Memória RAM** (maior primeiro)
 - `V`: Ordenar processos por **VRAM** (maior primeiro)
-- `e`: Exportar lista filtrada para **CSV** (arquivo com timestamp)
+- `e`: Exportar lista filtrada para **CSV** (arquivo com timestamp, com BOM UTF-8 para o Excel)
 - `E`: Exportar lista filtrada para **JSON** (arquivo com timestamp)
 - **Escudo de Proteção:** Processos vitais do Windows (`csrss.exe`, `svchost.exe`, `winlogon.exe`, etc.) são identificados com `🛡️ CRÍTICO` e disparam alertas visuais em vermelho para evitar telas azuis acidentais.
-- **Painel de Detalhes:** Ao selecionar um processo, um painel inferior exibe informações detalhadas: path completo, usuário, tempo de execução (uptime), PID pai, uso de GPU/VRAM e disco I/O.
+- **Painel de Detalhes:** Ao selecionar um processo, um painel inferior exibe informações detalhadas: path completo, **linha de comando** (a mesma da coluna "Linha de comando" do Gerenciador de Tarefas, quebrada em várias linhas quando é longa), usuário, tempo de execução (uptime), PID pai, uso de GPU/VRAM e disco I/O.
+- **Linha de comando sem privilégios:** processos de sistema ou de outros usuários só mostram a linha de comando quando o `cli_admin` roda como **Administrador**; sem isso o campo fica vazio, como no Gerenciador de Tarefas.
 
 ---
 
@@ -126,6 +127,21 @@ cli_admin top -n 10 --sort cpu
 cli_admin top -n 15 --sort gpu
 cli_admin top -n 15 --sort io
 ```
+
+### 2.1. Exportação de Processos (`cli_admin export`)
+```bash
+# Todos os processos -> processes_<timestamp>.csv no diretório atual
+cli_admin export
+
+# Só os processos do Chrome, em JSON, com arquivo de saída definido
+cli_admin_v3 export chrome --format json --output C:\Temp\chrome.json
+```
+O filtro é opcional e usa a mesma busca aproximada da TUI (por nome ou PID).
+
+Colunas do CSV: `PID, PPID, Nome, CPU%, Memoria_MB, Path, Linha_de_Comando, Usuario, Uptime, Protegido`.
+
+- O CSV segue o padrão RFC 4180: campos com vírgula, aspas ou quebra de linha vão entre aspas. Leia com um leitor de CSV de verdade (Excel, pandas, Power Query), não com `split(',')`.
+- O arquivo começa com BOM UTF-8, para o Excel (PT-BR) mostrar acentos corretamente.
 
 ### 3. Process Killer (`cli_admin kill`)
 ```bash

@@ -2,7 +2,21 @@ use super::gpu_nvml::NvidiaGpuInfo;
 use super::gpu_pdh::ProcessGpuMetrics;
 use super::models::{ProcessResourceInfo, SortField, SystemResourceOverview};
 use std::collections::HashMap;
-use sysinfo::{CpuRefreshKind, MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, System};
+use std::ffi::OsString;
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+/// Campos de processo que a aplicação usa. `everything()` também lia `environ`, `cwd` e `root`,
+/// que nenhuma tela usa, a cada tick. Campos estáticos (`exe`, `user`, `cmd`) só são lidos
+/// enquanto ainda estão vazios: o caminho, o dono e a linha de comando de um processo não mudam.
+fn proc_refresh_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing()
+        .with_cpu()
+        .with_memory()
+        .with_disk_usage()
+        .with_exe(UpdateKind::OnlyIfNotSet)
+        .with_user(UpdateKind::OnlyIfNotSet)
+        .with_cmd(UpdateKind::OnlyIfNotSet)
+}
 
 pub struct SystemMetricsManager {
     system: System,
@@ -14,7 +28,7 @@ impl SystemMetricsManager {
         // Carga inicial do sistema
         system.refresh_cpu_all();
         system.refresh_memory();
-        system.refresh_processes(ProcessesToUpdate::All, true);
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, proc_refresh_kind());
         Self { system }
     }
 
@@ -22,11 +36,7 @@ impl SystemMetricsManager {
     pub fn refresh(&mut self) {
         self.system.refresh_cpu_specifics(CpuRefreshKind::everything());
         self.system.refresh_memory_specifics(MemoryRefreshKind::everything());
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::everything(),
-        );
+        self.system.refresh_processes_specifics(ProcessesToUpdate::All, true, proc_refresh_kind());
     }
 
     /// Coleta a visão geral do sistema (CPU global, RAM e GPU)
@@ -135,6 +145,7 @@ impl SystemMetricsManager {
                 let user = proc.user_id().map(|u| u.to_string()).unwrap_or_default();
                 let start_time = proc.start_time();
                 let parent_pid = proc.parent().map(|p| p.as_u32());
+                let cmd_line = format_cmd_line(proc.cmd());
 
                 ProcessResourceInfo {
                     pid: pid_u32,
@@ -150,8 +161,25 @@ impl SystemMetricsManager {
                     start_time,
                     threads: 0,
                     parent_pid,
+                    cmd_line,
                 }
             })
             .collect()
     }
+}
+
+/// Monta a linha de comando a partir dos argumentos do processo, colocando entre aspas
+/// os argumentos que têm espaço ou aspas (ex.: `"C:\Program Filespp.exe" --flag`)
+pub fn format_cmd_line(args: &[OsString]) -> String {
+    args.iter()
+        .map(|arg| {
+            let text = arg.to_string_lossy();
+            if text.is_empty() || text.contains(char::is_whitespace) || text.contains('"') {
+                format!("\"{}\"", text.replace('"', "\\\""))
+            } else {
+                text.into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }

@@ -1,5 +1,7 @@
 pub mod app;
 pub mod event;
+pub mod fm;
+pub mod fm_ui;
 pub mod ui;
 
 use app::App;
@@ -67,6 +69,9 @@ async fn run_loop(
                 }
             }
             AppEvent::Tick => {
+                // Trabalho em segundo plano (disco etc.) é consultado a cada tick de 150 ms,
+                // não só no intervalo das métricas, para o resultado aparecer na hora.
+                app.poll_background();
                 if last_metric_tick.elapsed() >= metric_interval {
                     app.tick().await;
                     last_metric_tick = std::time::Instant::now();

@@ -5,11 +5,10 @@ use cli_admin::modules::net::{
 };
 use cli_admin::modules::process::{ProcessFilter, ProcessItem, ProcessShield};
 use cli_admin::modules::support::{
-    add_note, bytes_to_human, certified_status, diff_snapshots, disk_top, expand_subnet,
-    extract_ping_avg, list_notes, mask_serial, ntttcp_commands, parse_borrow_log,
-    parse_ipnet_table, parse_ntttcp_throughput, parse_ping_counts, parse_ping_summary,
-    parse_schtasks_csv, parse_lmstat, parse_totals, parse_user_line, ping_csv_row, read_note,
-    PingStats, SvcDiffKind, SvcSnapshot,
+    add_note, bytes_to_human, diff_snapshots, disk_top, disk_top_cancelavel,
+    expand_subnet, list_notes, ntttcp_commands, parse_ipnet_table, parse_ntttcp_throughput,
+    parse_ping_counts, parse_ping_summary, parse_schtasks_csv, ping_csv_row, read_note,
+    volume_info, PingStats, SvcDiffKind, SvcSnapshot,
 };
 use cli_admin::modules::top::{ProcessResourceInfo, SystemResourceOverview};
 use cli_admin::modules::vmware::{StartMode, StopMode, VmStatus};
@@ -61,6 +60,7 @@ fn test_process_filter() {
             vram_bytes: 0,
             disk_read_bytes_sec: 0,
             disk_write_bytes_sec: 0,
+            cmd_line: String::new(),
         },
         ProcessItem {
             pid: 1002,
@@ -78,6 +78,7 @@ fn test_process_filter() {
             vram_bytes: 0,
             disk_read_bytes_sec: 0,
             disk_write_bytes_sec: 0,
+            cmd_line: String::new(),
         },
         ProcessItem {
             pid: 2003,
@@ -95,6 +96,7 @@ fn test_process_filter() {
             vram_bytes: 0,
             disk_read_bytes_sec: 0,
             disk_write_bytes_sec: 0,
+            cmd_line: String::new(),
         },
     ];
 
@@ -129,6 +131,7 @@ fn test_top_models() {
         start_time: 0,
         threads: 0,
         parent_pid: None,
+        cmd_line: String::new(),
     };
 
     assert!((proc.memory_mb() - 150.0).abs() < 0.01);
@@ -276,69 +279,6 @@ fn test_net_proto_filter_cycle() {
     assert_eq!(NetProtoFilter::Udp.next(), NetProtoFilter::All);
 }
 
-const SAMPLE_LMSTAT: &str = r#"Flexible License Manager status on Wed 9/17 10:00
-
-License server status: 25734@srvlic
-
-Feature usage info:
-Users of solidworks:  (Total of 10 licenses issued;  Total of 2 licenses in use)
-
-  "solidworks" v2025.0101, vendor: sw_d
-  floating license
-
-    joao WS012 192.168.1.20 (v2025.0) (srvlic/25734 101), start Wed 9/17 9:00
-    MARIA WS034 192.168.1.21 (v2025.0) (srvlic/25734 102), start Wed 9/17 9:15
-Users of swofficepro:  (Total of 5 licenses issued;  Total of 0 licenses in use)
-
-  "swofficepro" v2025.0101, vendor: sw_d
-  floating license
-"#;
-
-#[test]
-fn test_parse_lmstat_totals() {
-    assert_eq!(
-        parse_totals("Users of solidworks:  (Total of 10 licenses issued;  Total of 2 licenses in use)"),
-        Some((10, 2))
-    );
-    assert_eq!(parse_totals("nada aqui"), None);
-}
-
-#[test]
-fn test_parse_lmstat_user_line() {
-    let u = parse_user_line("    joao WS012 192.168.1.20 (v2025.0) (srvlic/25734 101), start Wed 9/17 9:00").unwrap();
-    assert_eq!(u.user, "joao");
-    assert_eq!(u.host, "WS012");
-    assert_eq!(u.display, "192.168.1.20");
-    assert_eq!(u.version, "v2025.0");
-    assert_eq!(u.server_host, "srvlic");
-    assert_eq!(u.server_port, 25734);
-    assert_eq!(u.handle, 101);
-    assert_eq!(u.checkout, "Wed 9/17 9:00");
-    assert!(parse_user_line("  linha qualquer sem checkout").is_none());
-}
-
-#[test]
-fn test_parse_lmstat_full() {
-    let feats = parse_lmstat(SAMPLE_LMSTAT);
-    assert_eq!(feats.len(), 2);
-    assert_eq!(feats[0].name, "solidworks");
-    assert_eq!(feats[0].total_issued, 10);
-    assert_eq!(feats[0].total_used, 2);
-    assert_eq!(feats[0].free(), 8);
-    assert_eq!(feats[0].users.len(), 2);
-    assert_eq!(feats[1].name, "swofficepro");
-    assert_eq!(feats[1].free(), 5);
-}
-
-#[test]
-fn test_extract_ping_avg_locales() {
-    let en = "Packets: Sent = 4, Received = 4\nMinimum = 1ms, Maximum = 2ms, Average = 1ms";
-    assert_eq!(extract_ping_avg(en), Some("1ms".to_string()));
-    let pt = "Pacotes: Enviados = 4, Recebidos = 4\nMínimo = 1ms, Máximo = 2ms, Média = 2ms";
-    assert_eq!(extract_ping_avg(pt), Some("2ms".to_string()));
-    assert_eq!(extract_ping_avg("sem dados"), None);
-}
-
 #[test]
 fn test_notes_crud() {
     let dir = std::env::temp_dir().join(format!("cli_admin_notes_test_{}", std::process::id()));
@@ -421,27 +361,6 @@ fn test_ntttcp_helpers() {
 }
 
 #[test]
-fn test_mask_serial() {
-    assert_eq!(mask_serial("9000 0563 JXJJ"), "**** **** JXJJ");
-    // Serial real nunca aparece em claro: só o último grupo sobrevive
-    let m = mask_serial("9010 0563 2950 8363 HRXH YG85");
-    assert!(m.ends_with("YG85"));
-    assert!(!m.contains("9010"));
-}
-
-#[test]
-fn test_parse_borrow_log() {
-    let log = "16:20:11 (sw_d) BORROW: \"solidworks\" joao@WS012 1 licenses\n\
-               16:21:00 (sw_d) Server started\n\
-               17:00:00 (sw_d) BORROW: \"swofficepro\" maria@WS034 1 licenses\n";
-    let entries = parse_borrow_log(log);
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].feature, "solidworks");
-    assert_eq!(entries[0].user_host, "joao@WS012");
-    assert_eq!(entries[1].time, "17:00:00");
-}
-
-#[test]
 fn test_disk_top_fixture() {
     let root = std::env::temp_dir().join(format!("cli_admin_disk_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -489,10 +408,249 @@ fn test_ping_csv_row() {
 }
 
 #[test]
-fn test_certified_status() {
-    assert!(certified_status("NVIDIA RTX 500 Ada Generation Laptop GPU").starts_with("LINHA"));
-    assert!(certified_status("Intel(R) Arc(TM) Pro Graphics").starts_with("LINHA"));
-    assert!(certified_status("NVIDIA Quadro P2000").starts_with("LINHA"));
-    assert!(certified_status("NVIDIA GeForce RTX 4060").starts_with("NÃO"));
-    assert!(certified_status("XYZ 123").starts_with("DESCONHECIDA"));
+fn test_format_cmd_line() {
+    use cli_admin::modules::top::system::format_cmd_line;
+    use std::ffi::OsString;
+
+    let args: Vec<OsString> = vec![
+        r"C:\Program Files\app.exe".into(),
+        "--flag".into(),
+        "a b".into(),
+        "say \"hi\"".into(),
+    ];
+    assert_eq!(
+        format_cmd_line(&args),
+        r#""C:\Program Files\app.exe" --flag "a b" "say \"hi\"""#
+    );
+    assert_eq!(format_cmd_line(&[]), "");
+}
+
+#[test]
+fn test_processes_csv_export() {
+    use cli_admin::modules::process::processes_to_csv;
+
+    let items = vec![ProcessItem {
+        pid: 42,
+        name: "cmd.exe".to_string(),
+        cpu_pct: 1.0,
+        memory_bytes: 1024 * 1024 * 10,
+        is_protected: false,
+        selected: false,
+        exe_path: r"C:\Windows\cmd.exe".to_string(),
+        user: r"DOM\andre".to_string(),
+        start_time: 0,
+        threads: 0,
+        parent_pid: Some(1),
+        gpu_pct: 0.0,
+        vram_bytes: 0,
+        disk_read_bytes_sec: 0,
+        disk_write_bytes_sec: 0,
+        cmd_line: "cmd /c \"echo, oi\"".to_string(),
+    }];
+
+    let csv = processes_to_csv(&items);
+    assert!(csv.starts_with("\u{FEFF}PID,PPID,Nome"));
+    assert!(csv.lines().next().unwrap().contains("Linha_de_Comando"));
+    assert!(csv.contains(",\"cmd /c \"\"echo, oi\"\"\","));
+    assert!(csv.lines().nth(1).unwrap().ends_with(",NAO"));
+}
+
+// ---------------------------------------------------------------------------
+// V3: escudo na finalização, linha de comando completa e refresh enxuto
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v3_separar_protegidos_nunca_libera_protegido() {
+    use cli_admin::modules::process::killer::separar_protegidos;
+    let alvos = [(100, false), (200, true), (300, false), (400, true)];
+    let (liberados, bloqueados) = separar_protegidos(&alvos);
+    assert_eq!(liberados, vec![100, 300]);
+    assert_eq!(bloqueados, vec![200, 400]);
+}
+
+#[test]
+fn v3_separar_protegidos_lista_vazia() {
+    use cli_admin::modules::process::killer::separar_protegidos;
+    let (liberados, bloqueados) = separar_protegidos(&[]);
+    assert!(liberados.is_empty() && bloqueados.is_empty());
+}
+
+#[test]
+fn v3_format_cmd_line_aspas_em_argumento_com_espaco() {
+    use cli_admin::modules::top::system::format_cmd_line;
+    use std::ffi::OsString;
+    let args = vec![
+        OsString::from(r"C:\Program Files\app.exe"),
+        OsString::from("--flag"),
+        OsString::from("valor com espaco"),
+    ];
+    assert_eq!(
+        format_cmd_line(&args),
+        r#""C:\Program Files\app.exe" --flag "valor com espaco""#
+    );
+}
+
+/// Ponta a ponta: um processo criado pelo teste precisa aparecer com a linha de comando
+/// completa (executável + argumentos), não só com o caminho do executável.
+#[test]
+fn v3_linha_de_comando_completa_do_proprio_processo() {
+    use cli_admin::modules::top::SystemMetricsManager;
+    use std::collections::HashMap;
+
+    let mut child = std::process::Command::new("ping")
+        .args(["-n", "8", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("ping deve existir no Windows");
+    let pid = child.id();
+
+    // Dá tempo para o processo existir e atualiza a lista de processos.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let mut manager = SystemMetricsManager::new();
+    manager.refresh();
+    let procs = manager.get_all_processes(&HashMap::new());
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let alvo = procs
+        .iter()
+        .find(|p| p.pid == pid)
+        .expect("o processo criado pelo teste deve estar na lista");
+    assert!(
+        alvo.cmd_line.contains("-n") && alvo.cmd_line.contains("127.0.0.1"),
+        "linha de comando incompleta: {:?}",
+        alvo.cmd_line
+    );
+}
+
+// ---------------------------------------------------------------------------
+// V3: disco sob demanda, cancelável, com informação do volume
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v3_disk_top_cancelavel_cancelado_devolve_none() {
+    use std::sync::atomic::AtomicBool;
+    let root = std::env::temp_dir().join(format!("cli_admin_cancel_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::write(root.join("a").join("x.bin"), vec![0u8; 64]).unwrap();
+
+    // Já cancelado antes de começar: não deve devolver resultado
+    let cancelado = AtomicBool::new(true);
+    assert!(disk_top_cancelavel(&root, 10, &cancelado).is_none());
+
+    // Sem cancelamento: mesmo resultado de disk_top
+    let livre = AtomicBool::new(false);
+    let r = disk_top_cancelavel(&root, 10, &livre).expect("sem cancelar deve devolver");
+    assert_eq!(r.len(), disk_top(&root, 10).len());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn v3_volume_info_da_pasta_temporaria() {
+    let v = volume_info(&std::env::temp_dir()).expect("a unidade do TEMP deve ser encontrada");
+    assert!(v.total > 0, "capacidade total deve ser positiva");
+    assert!(v.free <= v.total, "livre não pode passar do total");
+}
+
+#[test]
+fn v3_volume_info_caminho_inexistente_e_none() {
+    assert!(volume_info(std::path::Path::new(r"Z:\caminho\que\nao\existe")).is_none());
+}
+
+/// Comportamento pedido: o Disco NÃO calcula ao entrar na seção; só por tecla; sem travar a
+/// interface; o resultado chega pelo `tick`; e `Esc` cancela.
+#[tokio::test]
+async fn v3_disco_so_calcula_por_tecla_sem_travar_e_esc_cancela() {
+    use cli_admin::tui::app::{ActiveTab, App, SupportSection};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::{Duration, Instant};
+
+    let root = std::env::temp_dir().join(format!("cli_admin_tui_disk_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("grande")).unwrap();
+    std::fs::create_dir_all(root.join("pequena")).unwrap();
+    std::fs::write(root.join("grande").join("a.bin"), vec![0u8; 4096]).unwrap();
+    std::fs::write(root.join("pequena").join("b.bin"), vec![0u8; 128]).unwrap();
+
+    let mut app = App::new(AppConfig::default(), std::path::PathBuf::from("config.toml")).await;
+    app.active_tab = ActiveTab::Support;
+    app.support_section = SupportSection::Disk;
+    app.disk_path = root.display().to_string();
+
+    // 1) Entrar na seção Disco não calcula nada
+    app.refresh_support_section().await;
+    assert!(app.disk_scan.is_none(), "não pode iniciar sozinho ao entrar na seção");
+    assert!(app.disk_entries.is_empty());
+
+    // 2) A tecla [r] inicia em segundo plano e devolve o controle na hora
+    let t0 = Instant::now();
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+    assert!(t0.elapsed() < Duration::from_secs(2), "a tecla não pode travar a interface");
+    assert!(app.disk_scan.is_some() || !app.disk_entries.is_empty());
+
+    // 3) O resultado chega pelo tick
+    for _ in 0..200 {
+        app.tick().await;
+        if app.disk_scan.is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(app.disk_scan.is_none(), "o cálculo deveria ter terminado");
+    assert_eq!(app.disk_entries.len(), 2);
+    assert!(app.disk_entries[0].path.ends_with("grande"), "a maior pasta vem primeiro");
+    assert!(app.disk_volume.is_some(), "a ocupação da unidade deve estar preenchida");
+
+    // 4) [Esc] cancela um cálculo em andamento
+    app.disk_entries.clear();
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+    assert!(app.disk_scan.is_none(), "Esc deve cancelar e limpar o estado");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Renderiza a TUI num terminal virtual e confere o gráfico de disco e a ausência da aba Licenças.
+#[tokio::test]
+async fn v3_render_grafico_de_disco_e_sem_aba_licencas() {
+    use cli_admin::modules::support::{DiskEntry, VolumeInfo};
+    use cli_admin::tui::app::{ActiveTab, App, SupportSection};
+    use cli_admin::tui::ui;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut app = App::new(AppConfig::default(), std::path::PathBuf::from("config.toml")).await;
+    app.active_tab = ActiveTab::Support;
+    app.support_section = SupportSection::Disk;
+    app.disk_path = r"C:\Dados".to_string();
+    app.disk_entries = vec![
+        DiskEntry { path: r"C:\Dados\videos".into(), bytes: 80 * 1024 * 1024 * 1024 },
+        DiskEntry { path: r"C:\Dados\projetos".into(), bytes: 40 * 1024 * 1024 * 1024 },
+        DiskEntry { path: r"C:\Dados\docs".into(), bytes: 5 * 1024 * 1024 * 1024 },
+    ];
+    app.disk_volume = Some(VolumeInfo {
+        mount: r"C:\".into(),
+        total: 500 * 1024 * 1024 * 1024,
+        free: 120 * 1024 * 1024 * 1024,
+    });
+
+    let mut terminal = Terminal::new(TestBackend::new(150, 32)).unwrap();
+    terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+    let buffer = terminal.backend().buffer().clone();
+    let mut tela = String::new();
+    for y in 0..buffer.area.height {
+        let linha: String = (0..buffer.area.width).map(|x| buffer[(x, y)].symbol().to_string()).collect();
+        tela.push_str(linha.trim_end());
+        tela.push('\n');
+    }
+    println!("{tela}");
+
+    assert!(tela.contains("█"), "deve haver barras cheias");
+    assert!(tela.contains("░"), "deve haver trecho vazio nas barras menores");
+    assert!(tela.contains("PROPORÇÃO") && tela.contains("% UNIDADE"));
+    assert!(tela.contains("Unidade C:"), "deve mostrar a ocupação da unidade");
+    assert!(tela.contains("videos"));
+    assert!(!tela.contains("Licenças"), "a aba Licenças foi removida");
+    assert!(tela.contains("[6] ") && !tela.contains("[7] "), "abas renumeradas: Suporte agora é [6]");
 }
