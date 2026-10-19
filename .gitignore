@@ -1,0 +1,9 @@
+# Build
+target/
+
+# Runtime do servidor MCP e do app: trilha de auditoria e planos aguardando aprovação
+audit/
+mcp/pendentes/
+
+# Logs locais
+*.log

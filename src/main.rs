@@ -64,6 +64,23 @@ enum Commands {
 
     /// Exporta a lista de processos (CSV ou JSON) com a linha de comando de cada um
     Export(ExportArgs),
+
+    /// Servidor MCP: revisão e aprovação humana dos planos pedidos pelo agente
+    Mcp(McpArgs),
+}
+
+#[derive(Args, Debug)]
+struct McpArgs {
+    #[command(subcommand)]
+    action: McpAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum McpAction {
+    /// Lista os planos que o agente pediu e que aguardam aprovação humana
+    Pendentes,
+    /// Aprova um plano (a aprovação vale uma única execução e expira)
+    Aprovar { id: String },
 }
 
 #[derive(Args, Debug)]
@@ -428,9 +445,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Commands::Netdiag(args) => handle_netdiag_cli(config, args).await?,
             Commands::Winsys(args) => handle_winsys_cli(config, args).await?,
             Commands::Export(args) => handle_export_cli(config, args).await?,
+            Commands::Mcp(args) => handle_mcp_cli(config, args)?,
         },
     }
 
+    Ok(())
+}
+
+fn handle_mcp_cli(config: AppConfig, args: McpArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use cli_admin::mcp::approval;
+    let pasta = std::path::PathBuf::from(&config.mcp.pasta_planos);
+    let agora = approval::agora_ms();
+    match args.action {
+        McpAction::Pendentes => {
+            let lista = approval::listar_pendentes(&pasta, agora);
+            if lista.is_empty() {
+                println!("Nenhum plano aguardando aprovação.");
+            }
+            for p in lista {
+                println!("== {}  ({})", p.id, p.ferramenta);
+                println!("   {}", p.descricao);
+                println!("   alvos: {}", p.payload);
+                println!("   expira em {} s", (p.validade_ms.saturating_sub(agora.saturating_sub(p.criado_ms))) / 1000);
+                println!("   para aprovar: cli_admin_v3 mcp aprovar {}", p.id);
+            }
+        }
+        McpAction::Aprovar { id } => match approval::aprovar(&pasta, &id, agora) {
+            Ok(p) => println!("Plano {} aprovado: {}", p.id, p.descricao),
+            Err(e) => {
+                eprintln!("não foi possível aprovar: {e}");
+                std::process::exit(1);
+            }
+        },
+    }
     Ok(())
 }
 

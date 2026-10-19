@@ -52,3 +52,18 @@ windows = { version = "0.58", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_Storage_FileSystem",
 ] }
+
+# Servidor MCP (cli_admin_mcp). Opcional: o cli_admin_v3 normal não depende dele.
+[features]
+mcp = ["dep:rmcp"]
+
+[dependencies.rmcp]
+version = "=3.5.1"
+default-features = false
+features = ["server", "macros", "transport-io"]
+optional = true
+
+[[bin]]
+name = "cli_admin_mcp"
+path = "src/bin/cli_admin_mcp.rs"
+required-features = ["mcp"]

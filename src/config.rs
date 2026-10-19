@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub netdiag: NetdiagConfig,
     #[serde(default)]
     pub support: SupportConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 impl Default for AppConfig {
@@ -31,6 +33,110 @@ impl Default for AppConfig {
             notes: NotesConfig::default(),
             netdiag: NetdiagConfig::default(),
             support: SupportConfig::default(),
+            mcp: McpConfig::default(),
+        }
+    }
+}
+
+/// Servidor MCP (`cli_admin_mcp`). Padrões restritivos: escrita desligada, rede desligada,
+/// arquivos só dentro da pasta do perfil do usuário e sem os caminhos sensíveis da lista de negação.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpConfig {
+    /// Permite o nível A (aplicar planos aprovados por humano). Padrão: desligado.
+    #[serde(default)]
+    pub allow_apply: bool,
+    /// Mostra a linha de comando (já redigida). `false` omite o campo.
+    #[serde(default = "mcp_true")]
+    pub expor_linha_de_comando: bool,
+    /// Permite o nível 3 (login) no teste de banco. Padrão: desligado.
+    #[serde(default)]
+    pub db_allow_login: bool,
+    /// Raízes que as ferramentas de arquivo podem ver. Padrão: a pasta do perfil do usuário.
+    #[serde(default = "mcp_raizes")]
+    pub raizes_permitidas: Vec<String>,
+    #[serde(default = "mcp_negados")]
+    pub caminhos_negados: Vec<String>,
+    /// Hosts que `rede_probe` pode testar. Vazio = ferramenta desligada.
+    #[serde(default)]
+    pub hosts_permitidos: Vec<String>,
+    #[serde(default = "mcp_por_minuto")]
+    pub limite_por_minuto: usize,
+    #[serde(default = "mcp_sessao")]
+    pub limite_sessao: u64,
+    #[serde(default = "mcp_max_resposta")]
+    pub max_resposta_bytes: usize,
+    #[serde(default = "mcp_max_campo")]
+    pub max_campo: usize,
+    #[serde(default = "mcp_validade")]
+    pub validade_plano_s: u64,
+    #[serde(default = "mcp_pasta_planos")]
+    pub pasta_planos: String,
+    #[serde(default = "mcp_auditoria")]
+    pub auditoria: String,
+}
+
+fn mcp_true() -> bool {
+    true
+}
+
+fn mcp_raizes() -> Vec<String> {
+    dirs::home_dir().map(|p| vec![p.display().to_string()]).unwrap_or_default()
+}
+
+fn mcp_negados() -> Vec<String> {
+    [
+        ".ssh", ".aws", ".azure", ".gnupg", ".kube", ".docker", ".git-credentials", "*.pem", "*.pfx",
+        "*.key", ".env", "NTUSER.DAT", "Login Data", "Cookies", "Credentials",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn mcp_por_minuto() -> usize {
+    60
+}
+
+fn mcp_sessao() -> u64 {
+    1000
+}
+
+fn mcp_max_resposta() -> usize {
+    65_536
+}
+
+fn mcp_max_campo() -> usize {
+    512
+}
+
+fn mcp_validade() -> u64 {
+    300
+}
+
+fn mcp_pasta_planos() -> String {
+    "mcp/pendentes".to_string()
+}
+
+fn mcp_auditoria() -> String {
+    "audit/mcp.log".to_string()
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            allow_apply: false,
+            expor_linha_de_comando: true,
+            db_allow_login: false,
+            raizes_permitidas: mcp_raizes(),
+            caminhos_negados: mcp_negados(),
+            hosts_permitidos: Vec::new(),
+            limite_por_minuto: mcp_por_minuto(),
+            limite_sessao: mcp_sessao(),
+            max_resposta_bytes: mcp_max_resposta(),
+            max_campo: mcp_max_campo(),
+            validade_plano_s: mcp_validade(),
+            pasta_planos: mcp_pasta_planos(),
+            auditoria: mcp_auditoria(),
         }
     }
 }
