@@ -1,5 +1,10 @@
-use super::app::{ActiveTab, AddVmField, App, InputMode, ModalState, ProcSort, SupportSection};
+use super::app::{
+    ActiveTab, AddVmField, App, CriarCampo, InputMode, ModalState, Pendente, ProcSort,
+    SupportSection,
+};
 use crate::modules::net::NetSort;
+use crate::modules::services::{Acao, StartType, ops, scm};
+use crate::modules::support::SvcState;
 use crate::modules::top::SortField;
 use crate::modules::vmware::VmStatus;
 use ratatui::{
@@ -34,6 +39,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ActiveTab::Network => draw_network_tab(f, chunks[1], app),
         ActiveTab::Files => super::fm_ui::draw_files_tab(f, chunks[1], &mut app.fm),
         ActiveTab::Support => draw_support_tab(f, chunks[1], app),
+        ActiveTab::Servicos => draw_servicos_tab(f, chunks[1], app),
     }
 
     draw_footer(f, chunks[2], app);
@@ -49,6 +55,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ModalState::AddVm { field, alias, path } => {
             draw_add_vm_modal(f, size, *field, alias, path);
         }
+        ModalState::ServicoInicio { alvo } => draw_servico_inicio_modal(f, size, alvo),
+        ModalState::ServicoConfirm { pendente } => draw_servico_confirm_modal(f, size, pendente),
+        ModalState::ServicoCriar { campo, nome, exe, exibicao, inicio } => {
+            draw_servico_criar_modal(f, size, *campo, nome, exe, exibicao, *inicio);
+        }
+        ModalState::PlanosPendentes { planos, sel } => draw_planos_modal(f, size, planos, *sel),
         ModalState::Help => {
             draw_help_modal(f, size);
         }
@@ -70,6 +82,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(" [4] 🌐 Rede ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(" [5] 📁 Arquivos ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(" [6] 🧰 Suporte ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" [7] ⚙️ Serviços ", Style::default().add_modifier(Modifier::BOLD)),
     ];
 
     let selected_index = app.active_tab as usize;
@@ -1118,6 +1131,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         ActiveTab::Support => {
             "[[ ]] Trocar seção | [r/Enter] Executar | [Esc] Cancelar cálculo | [/] Editar campo | [v] Ler nota | [e] Exportar ping | [Tab] Aba | [?] Ajuda | [q] Sair"
         }
+        ActiveTab::Servicos => {
+            "[s] Iniciar | [t] Parar | [R] Reiniciar | [p] Pausar | [c] Continuar | [i] Início | [n] Criar | [/] Filtrar | [r] Atualizar | [?] Ajuda | [q] Sair"
+        }
     };
 
     let footer_p = Paragraph::new(shortcuts)
@@ -1269,7 +1285,8 @@ fn draw_help_modal(f: &mut Frame, area: Rect) {
         Line::from(Span::styled("GUIA RÁPIDO DE TECLAS E ATALHOS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from(Span::styled("Navegação Global:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
-        Line::from("  1..6         - Alternar diretamente entre abas"),
+        Line::from("  1..7         - Alternar diretamente entre abas"),
+        Line::from("  F2           - Aprovar planos do MCP aguardando aprovação"),
         Line::from("  Tab / Shift+Tab - Percorrer abas (Próxima / Anterior)"),
         Line::from("  Setas / j, k  - Navegar verticalmente nas listas de itens"),
         Line::from("  PgUp / PgDown - Rolar listas rapidamente"),
@@ -1333,6 +1350,15 @@ fn draw_help_modal(f: &mut Frame, area: Rect) {
         Line::from("  v             - Ler nota selecionada"),
         Line::from("  e             - Exportar evidência de ping (CSV, seção Latência)"),
         Line::from(""),
+        Line::from(Span::styled("Aba 7: Serviços:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from("  /             - Filtrar por nome ou nome de exibição (Enter/Esc encerra)"),
+        Line::from("  s / t / R     - Iniciar / parar / reiniciar o serviço selecionado"),
+        Line::from("  p / c         - Pausar / continuar"),
+        Line::from("  i             - Mudar tipo de inicialização (a, t, m, d)"),
+        Line::from("  n             - Criar serviço (Tab troca campo, espaço troca início)"),
+        Line::from("  r             - Recarregar a lista"),
+        Line::from("  Toda ação mostra o plano e pede confirmação; parar dependentes é automático."),
+        Line::from(""),
         Line::from(Span::styled("Pressione [ESC] ou [Enter] para fechar", Style::default().fg(Color::Green))),
     ];
 
@@ -1348,6 +1374,291 @@ fn draw_help_modal(f: &mut Frame, area: Rect) {
         .alignment(Alignment::Left);
 
     f.render_widget(paragraph, modal_area);
+}
+
+fn draw_planos_modal(f: &mut Frame, area: Rect, planos: &[crate::mcp::approval::Plano], sel: usize) {
+    let modal_area = centered_rect(75, 60, area);
+    f.render_widget(Clear, modal_area);
+
+    let agora = crate::mcp::approval::agora_ms();
+    let mut text: Vec<Line> = Vec::new();
+    if planos.is_empty() {
+        text.push(Line::from("Nenhum plano aguardando aprovação."));
+    }
+    for (i, p) in planos.iter().enumerate() {
+        let foco = i == sel;
+        let cor = if foco { Color::Yellow } else { Color::White };
+        let marca = if foco { "▶ " } else { "  " };
+        let restante = p.validade_ms.saturating_sub(agora.saturating_sub(p.criado_ms)) / 1000;
+        text.push(Line::from(Span::styled(
+            format!("{}{}  ({})  expira em {} s", marca, p.id, p.ferramenta, restante),
+            Style::default().fg(cor).add_modifier(Modifier::BOLD),
+        )));
+        text.push(Line::from(format!("     {}", p.descricao)));
+        text.push(Line::from(""));
+    }
+    text.push(Line::from(Span::styled(
+        "[y/Enter] Aprovar selecionado   [↑/↓] Navegar   [Esc/F2] Fechar",
+        Style::default().fg(Color::Green),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Planos do MCP aguardando aprovação ")
+        .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), modal_area);
+}
+
+/// Rótulo em pt-BR para o cabeçalho dos modais de serviço.
+fn rotulo_acao(acao: Acao) -> &'static str {
+    match acao {
+        Acao::Start => "Iniciar",
+        Acao::Stop => "Parar",
+        Acao::Restart => "Reiniciar",
+        Acao::Pause => "Pausar",
+        Acao::Continue => "Continuar",
+        Acao::MudarInicializacao(_) => "Mudar início de",
+        Acao::Criar(_) => "Criar",
+    }
+}
+
+fn draw_servicos_tab(f: &mut Frame, area: Rect, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(7)])
+        .split(area);
+
+    // Barra de filtro
+    let (texto, cor) = if app.servicos_busca {
+        (format!("/{}_", app.servicos_query), Color::Yellow)
+    } else if app.servicos_query.is_empty() {
+        ("Pressione [/] para filtrar por nome ou nome de exibição".to_string(), Color::DarkGray)
+    } else {
+        (format!("Filtro: {}", app.servicos_query), Color::Cyan)
+    };
+    let filtro = Paragraph::new(texto).style(Style::default().fg(cor)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(" Filtro "),
+    );
+    f.render_widget(filtro, chunks[0]);
+
+    // Tabela de serviços
+    let visiveis = app.servicos_visiveis();
+    let cabecalho = Row::new(vec![
+        Span::styled("NOME", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("EXIBIÇÃO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("ESTADO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("INÍCIO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ])
+    .height(1)
+    .bottom_margin(1);
+    let linhas: Vec<Row> = visiveis
+        .iter()
+        .map(|&i| {
+            let s = &app.servicos[i];
+            let protegido = app.servico_escudo.e_protegido(&s.name);
+            let nome = if protegido { format!("🛡️ {}", s.name) } else { s.name.clone() };
+            let cor_nome = if protegido { Color::Red } else { Color::Cyan };
+            let cor_estado = match s.state {
+                SvcState::Running => Color::Green,
+                SvcState::Stopped => Color::DarkGray,
+                _ => Color::Yellow,
+            };
+            Row::new(vec![
+                Span::styled(nome, Style::default().fg(cor_nome)),
+                Span::raw(s.display_name.clone()),
+                Span::styled(s.state.label(), Style::default().fg(cor_estado)),
+                Span::raw(s.start_type.label()),
+            ])
+        })
+        .collect();
+    let tabela = Table::new(
+        linhas,
+        [
+            Constraint::Length(30),
+            Constraint::Min(28),
+            Constraint::Length(10),
+            Constraint::Length(18),
+        ],
+    )
+    .header(cabecalho)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(format!(" Serviços ({} de {}) ", visiveis.len(), app.servicos.len()))
+            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    )
+    .row_highlight_style(Style::default().bg(Color::Rgb(30, 45, 60)))
+    .highlight_symbol("▶ ");
+    app.servicos_table_state.select(Some(app.servicos_sel));
+    f.render_stateful_widget(tabela, chunks[1], &mut app.servicos_table_state);
+
+    // Detalhe do serviço selecionado e operação em andamento
+    let mut texto: Vec<Line> = match visiveis.get(app.servicos_sel).map(|&i| &app.servicos[i]) {
+        Some(s) => {
+            let protegido = app.servico_escudo.e_protegido(&s.name);
+            vec![
+                Line::from(vec![
+                    Span::styled("Caminho: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(if s.binary_path.is_empty() { "<não disponível>" } else { &s.binary_path }),
+                ]),
+                Line::from(vec![
+                    Span::styled("Conta: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(if s.account.is_empty() { "<não disponível>" } else { &s.account }),
+                ]),
+                Line::from(if protegido {
+                    Span::styled(
+                        "🛡️ Crítico: parar, reiniciar e pausar são bloqueados.",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::raw("Crítico: não")
+                }),
+            ]
+        }
+        None => vec![Line::from("Nenhum serviço corresponde ao filtro.")],
+    };
+    if let Some(consulta) = app.servico_em_andamento() {
+        texto.push(Line::from(Span::styled(
+            format!("⏳ Operação em andamento: {}", consulta),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    let detalhe = Paragraph::new(texto).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(" Detalhe ")
+            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    );
+    f.render_widget(detalhe, chunks[2]);
+}
+
+fn draw_servico_inicio_modal(f: &mut Frame, area: Rect, alvo: &str) {
+    let modal_area = centered_rect(55, 40, area);
+    f.render_widget(Clear, modal_area);
+
+    let text = vec![
+        Line::from(Span::styled(
+            format!("Novo tipo de inicialização para '{}':", alvo),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("  [a] Automático"),
+        Line::from("  [t] Automático (atrasado)"),
+        Line::from("  [m] Manual"),
+        Line::from("  [d] Desabilitado"),
+        Line::from(""),
+        Line::from(Span::styled("[ESC] Cancelar", Style::default().fg(Color::Green))),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Tipo de inicialização ");
+    f.render_widget(Paragraph::new(text).block(block).alignment(Alignment::Left), modal_area);
+}
+
+fn draw_servico_confirm_modal(f: &mut Frame, area: Rect, pendente: &Pendente) {
+    let modal_area = centered_rect(65, 55, area);
+    f.render_widget(Clear, modal_area);
+
+    let mut text: Vec<Line> = match pendente {
+        Pendente::Acao(plano) => {
+            let mut linhas = vec![
+                Line::from(Span::styled(
+                    format!("{} '{}'?", rotulo_acao(plano.acao), plano.alvo),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+            ];
+            for passo in ops::simulacao(plano).passos {
+                linhas.push(Line::from(format!("  • {}", passo)));
+            }
+            linhas
+        }
+        Pendente::Criar { nome, exe, tipo, .. } => vec![
+            Line::from(Span::styled(
+                format!("Criar serviço '{}'?", nome),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(format!("  • executável: {}", exe)),
+            Line::from(format!("  • início: {}", tipo.label())),
+            Line::from("  • conta: LocalSystem (padrão do SCM)"),
+        ],
+    };
+    if !scm::e_elevado() {
+        text.push(Line::from(Span::styled(
+            "⚠ Sem privilégio de Administrador: a execução será recusada.",
+            Style::default().fg(Color::Red),
+        )));
+    }
+    text.push(Line::from(""));
+    text.push(Line::from(vec![
+        Span::styled(" [Y / Enter] EXECUTAR ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::raw("    "),
+        Span::styled(" [N / ESC] CANCELAR ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+    ]));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Confirmar ação em serviço ")
+        .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), modal_area);
+}
+
+fn draw_servico_criar_modal(
+    f: &mut Frame,
+    area: Rect,
+    campo: CriarCampo,
+    nome: &str,
+    exe: &str,
+    exibicao: &str,
+    inicio: StartType,
+) {
+    let modal_area = centered_rect(70, 50, area);
+    f.render_widget(Clear, modal_area);
+
+    let linha = |c: CriarCampo, rotulo: &str, valor: String| {
+        let foco = c == campo;
+        let cor = if foco { Color::Yellow } else { Color::White };
+        let marca = if foco { "▶ " } else { "  " };
+        let valor = if foco && c != CriarCampo::Inicio { format!("{}_", valor) } else { valor };
+        Line::from(vec![
+            Span::styled(
+                format!("{}{:<13}", marca, rotulo),
+                Style::default().fg(cor).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(valor, Style::default().fg(cor)),
+        ])
+    };
+    let text = vec![
+        linha(CriarCampo::Nome, "Nome:", nome.to_string()),
+        linha(CriarCampo::Exe, "Executável:", exe.to_string()),
+        linha(CriarCampo::Exibicao, "Exibição:", exibicao.to_string()),
+        linha(CriarCampo::Inicio, "Início:", format!("{} (espaço troca)", inicio.label())),
+        Line::from(""),
+        Line::from("Executável: caminho absoluto de um .exe que existe."),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[Tab] Próximo campo   [Enter] Revisar   [ESC] Cancelar",
+            Style::default().fg(Color::Green),
+        )),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Criar serviço ");
+    f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), modal_area);
 }
 
 pub(super) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

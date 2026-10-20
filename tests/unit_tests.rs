@@ -652,5 +652,5 @@ async fn v3_render_grafico_de_disco_e_sem_aba_licencas() {
     assert!(tela.contains("Unidade C:"), "deve mostrar a ocupação da unidade");
     assert!(tela.contains("videos"));
     assert!(!tela.contains("Licenças"), "a aba Licenças foi removida");
-    assert!(tela.contains("[6] ") && !tela.contains("[7] "), "abas renumeradas: Suporte agora é [6]");
+    assert!(tela.contains("[6] ") && tela.contains("[7] ") && tela.contains("Serviços"), "Suporte é [6]; Serviços é a nova [7]");
 }

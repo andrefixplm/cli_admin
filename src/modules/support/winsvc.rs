@@ -56,6 +56,7 @@ fn pwstr_to_string(p: windows::core::PWSTR) -> String {
 /// ao contrário do parse de `sc query`).
 #[cfg(windows)]
 pub fn list_services() -> Result<Vec<SvcInfo>, String> {
+    use windows::Win32::Foundation::ERROR_MORE_DATA;
     use windows::Win32::System::Services::*;
     use windows::core::PCWSTR;
 
@@ -66,7 +67,8 @@ pub fn list_services() -> Result<Vec<SvcInfo>, String> {
         let mut needed: u32 = 0;
         let mut count: u32 = 0;
         let mut resume: u32 = 0;
-        let _ = EnumServicesStatusExW(
+        // Primeira chamada só mede o tamanho. Qualquer erro além de ERROR_MORE_DATA é real.
+        if let Err(e) = EnumServicesStatusExW(
             scm,
             SC_ENUM_PROCESS_INFO,
             SERVICE_WIN32,
@@ -76,19 +78,26 @@ pub fn list_services() -> Result<Vec<SvcInfo>, String> {
             &mut count,
             Some(&mut resume),
             PCWSTR::null(),
-        );
+        ) {
+            if (e.code().0 as u32) & 0xFFFF != ERROR_MORE_DATA.0 {
+                let _ = CloseServiceHandle(scm);
+                return Err(format!("EnumServicesStatusEx: {}", e));
+            }
+        }
         if needed == 0 {
             let _ = CloseServiceHandle(scm);
             return Ok(Vec::new());
         }
 
-        let mut buf = vec![0u8; needed as usize];
+        // Buffer em u64 para o alinhamento bater com ENUM_SERVICE_STATUS_PROCESSW.
+        let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
+        let bytes = std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len() * 8);
         EnumServicesStatusExW(
             scm,
             SC_ENUM_PROCESS_INFO,
             SERVICE_WIN32,
             SERVICE_STATE_ALL,
-            Some(buf.as_mut_slice()),
+            Some(bytes),
             &mut needed,
             &mut count,
             Some(&mut resume),
@@ -102,7 +111,7 @@ pub fn list_services() -> Result<Vec<SvcInfo>, String> {
         let mut out = Vec::with_capacity(count as usize);
         let row_size = std::mem::size_of::<ENUM_SERVICE_STATUS_PROCESSW>();
         for i in 0..count as usize {
-            let row = &*(buf.as_ptr().add(i * row_size) as *const ENUM_SERVICE_STATUS_PROCESSW);
+            let row = &*(buf.as_ptr().cast::<u8>().add(i * row_size) as *const ENUM_SERVICE_STATUS_PROCESSW);
             let st = row.ServiceStatusProcess.dwCurrentState;
             let state = if st == SERVICE_RUNNING {
                 SvcState::Running

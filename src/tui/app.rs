@@ -12,6 +12,11 @@ use crate::modules::top::{
     GpuPdhCollector, NvidiaCollector, NvidiaGpuInfo, ProcessResourceInfo, SortField,
     SystemMetricsManager, SystemResourceOverview,
 };
+use crate::mcp::approval;
+use crate::modules::services::models::{nome_valido, valida_caminho_criacao};
+use crate::modules::services::{
+    Acao, Opcoes, Plano, Relatorio, Resultado, ServiceShield, StartType, SvcDetail, ops,
+};
 use crate::modules::vmware::{StartMode, StopMode, VmDiscovery, VmInfo, VmwareClient};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -29,6 +34,7 @@ pub enum ActiveTab {
     Network = 3,
     Files = 4,
     Support = 5,
+    Servicos = 6,
 }
 
 impl ActiveTab {
@@ -39,18 +45,20 @@ impl ActiveTab {
             ActiveTab::ProcessManager => ActiveTab::Network,
             ActiveTab::Network => ActiveTab::Files,
             ActiveTab::Files => ActiveTab::Support,
-            ActiveTab::Support => ActiveTab::Vmware,
+            ActiveTab::Support => ActiveTab::Servicos,
+            ActiveTab::Servicos => ActiveTab::Vmware,
         }
     }
 
     pub fn prev(&self) -> Self {
         match self {
-            ActiveTab::Vmware => ActiveTab::Support,
+            ActiveTab::Vmware => ActiveTab::Servicos,
             ActiveTab::TopMetrics => ActiveTab::Vmware,
             ActiveTab::ProcessManager => ActiveTab::TopMetrics,
             ActiveTab::Network => ActiveTab::ProcessManager,
             ActiveTab::Files => ActiveTab::Network,
             ActiveTab::Support => ActiveTab::Files,
+            ActiveTab::Servicos => ActiveTab::Support,
         }
     }
 }
@@ -137,7 +145,112 @@ pub enum ModalState {
         alias: String,
         path: String,
     },
+    /// Escolha do novo tipo de inicialização de um serviço (a, t, m, d).
+    ServicoInicio {
+        alvo: String,
+    },
+    /// Ação de serviço pronta, aguardando confirmação.
+    ServicoConfirm {
+        pendente: Pendente,
+    },
+    /// Formulário para criar um serviço.
+    ServicoCriar {
+        campo: CriarCampo,
+        nome: String,
+        exe: String,
+        exibicao: String,
+        inicio: StartType,
+    },
+    /// Planos do servidor MCP aguardando aprovação humana (tecla F2).
+    PlanosPendentes {
+        planos: Vec<approval::Plano>,
+        sel: usize,
+    },
     Help,
+}
+
+/// Ação de serviço aguardando confirmação do usuário.
+#[derive(Debug, Clone)]
+pub enum Pendente {
+    Acao(Plano),
+    Criar {
+        nome: String,
+        exe: String,
+        exibicao: String,
+        tipo: StartType,
+    },
+}
+
+/// Campo focado no formulário de criação de serviço.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CriarCampo {
+    Nome,
+    Exe,
+    Exibicao,
+    Inicio,
+}
+
+impl CriarCampo {
+    pub fn next(&self) -> Self {
+        match self {
+            CriarCampo::Nome => CriarCampo::Exe,
+            CriarCampo::Exe => CriarCampo::Exibicao,
+            CriarCampo::Exibicao => CriarCampo::Inicio,
+            CriarCampo::Inicio => CriarCampo::Nome,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            CriarCampo::Nome => CriarCampo::Inicio,
+            CriarCampo::Exe => CriarCampo::Nome,
+            CriarCampo::Exibicao => CriarCampo::Exe,
+            CriarCampo::Inicio => CriarCampo::Exibicao,
+        }
+    }
+}
+
+/// Próximo tipo de inicialização ao apertar espaço no formulário.
+fn proximo_inicio(atual: StartType) -> StartType {
+    match atual {
+        StartType::Automatico => StartType::AutomaticoAtrasado,
+        StartType::AutomaticoAtrasado => StartType::Manual,
+        StartType::Manual => StartType::Desabilitado,
+        StartType::Desabilitado | StartType::Desconhecido => StartType::Automatico,
+    }
+}
+
+/// Campo de texto do formulário de criação, se o campo focado for textual.
+fn campo_texto<'a>(
+    campo: CriarCampo,
+    nome: &'a mut String,
+    exe: &'a mut String,
+    exibicao: &'a mut String,
+) -> Option<&'a mut String> {
+    match campo {
+        CriarCampo::Nome => Some(nome),
+        CriarCampo::Exe => Some(exe),
+        CriarCampo::Exibicao => Some(exibicao),
+        CriarCampo::Inicio => None,
+    }
+}
+
+/// Uma linha de resumo para a barra de status.
+fn resumo(rel: &Relatorio) -> String {
+    match &rel.resultado {
+        Resultado::Concluido => format!("✔ {}: concluído ({} passo(s))", rel.alvo, rel.passos.len()),
+        Resultado::DryRun => format!("{}: simulação, nada foi alterado", rel.alvo),
+        Resultado::Cancelado => format!("{}: operação cancelada", rel.alvo),
+        Resultado::NoOp(m) => format!("{}: {}", rel.alvo, m),
+        Resultado::Recusado(m) => format!("{} recusado: {}", rel.alvo, m),
+        Resultado::Falhou(m) => format!("✖ {}: {}", rel.alvo, m),
+    }
+}
+
+/// Operação de serviço rodando em thread própria. A interface consulta o resultado a cada tick.
+struct ServicoEmAndamento {
+    rx: mpsc::Receiver<Relatorio>,
+    consulta: String,
 }
 
 /// Cálculo de tamanho de pastas em segundo plano. Só existe enquanto o usuário
@@ -150,6 +263,14 @@ pub struct DiskScan {
 }
 
 pub struct App {
+    // Aba Serviços
+    pub servico_escudo: ServiceShield,
+    pub servicos: Vec<SvcDetail>,
+    pub servicos_query: String,
+    pub servicos_busca: bool,
+    pub servicos_sel: usize,
+    pub servicos_table_state: TableState,
+    servico_op: Option<ServicoEmAndamento>,
     pub config: AppConfig,
     pub config_path: PathBuf,
     pub active_tab: ActiveTab,
@@ -264,6 +385,7 @@ impl App {
             gpu_power_watts: None,
         };
 
+        let servico_escudo = ServiceShield::new(&config.services.protected_names);
         let mut app = Self {
             config: config.clone(),
             config_path,
@@ -325,6 +447,13 @@ impl App {
             note_query: String::new(),
             note_body: None,
             kill_history: Vec::new(),
+            servico_escudo,
+            servicos: Vec::new(),
+            servicos_query: String::new(),
+            servicos_busca: false,
+            servicos_sel: 0,
+            servicos_table_state: TableState::default(),
+            servico_op: None,
         };
 
         app.refresh_vms().await;
@@ -580,7 +709,273 @@ impl App {
     }
 
     /// Consulta tudo o que roda em segundo plano. Chamado a cada tick da interface (150 ms).
+    /// Abre a lista de planos do MCP que aguardam aprovação (tecla F2).
+    fn abrir_planos_pendentes(&mut self) {
+        let pasta = PathBuf::from(&self.config.mcp.pasta_planos);
+        let planos = approval::listar_pendentes(&pasta, approval::agora_ms());
+        self.modal = ModalState::PlanosPendentes { planos, sel: 0 };
+    }
+
+    /// Aprova um plano pela TUI. Quem aprova é a pessoa que está olhando a tela: o agente só
+    /// consome o plano depois. Cada aprovação fica registrada na auditoria do MCP.
+    fn aprovar_plano(&mut self, id: &str, sel: usize) {
+        let pasta = PathBuf::from(&self.config.mcp.pasta_planos);
+        match approval::aprovar(&pasta, id, approval::agora_ms()) {
+            Ok(p) => {
+                let msg = format!("plano={} ferramenta={} aprovado_por=tui", p.id, p.ferramenta);
+                let arq = PathBuf::from(&self.config.mcp.auditoria);
+                if let Err(e) = crate::audit::registrar(&arq, "mcp.aprovar", "ok", &msg) {
+                    error!("Falha ao gravar auditoria de aprovação: {}", e);
+                }
+                self.set_status(format!("Plano {} aprovado: {}", p.id, p.descricao));
+            }
+            Err(e) => self.set_status(format!("Não foi possível aprovar {}: {}", id, e)),
+        }
+        let planos = approval::listar_pendentes(&pasta, approval::agora_ms());
+        let sel = sel.min(planos.len().saturating_sub(1));
+        self.modal = ModalState::PlanosPendentes { planos, sel };
+    }
+
+    /// Serviço cuja operação está em andamento, para a interface mostrar o aviso.
+    pub fn servico_em_andamento(&self) -> Option<&str> {
+        self.servico_op.as_ref().map(|op| op.consulta.as_str())
+    }
+
+    /// Carrega a lista de serviços na primeira vez que a aba é aberta.
+    fn garantir_servicos(&mut self) {
+        if self.servicos.is_empty() && self.servico_op.is_none() {
+            self.recarregar_servicos();
+        }
+    }
+
+    /// Índices dos serviços que passam pelo filtro (nome ou nome de exibição).
+    pub fn servicos_visiveis(&self) -> Vec<usize> {
+        let q = self.servicos_query.to_lowercase();
+        self.servicos
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                q.is_empty()
+                    || s.name.to_lowercase().contains(&q)
+                    || s.display_name.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn alvo_selecionado(&self) -> Option<String> {
+        let visiveis = self.servicos_visiveis();
+        visiveis.get(self.servicos_sel).map(|&i| self.servicos[i].name.clone())
+    }
+
+    /// Relê a lista de serviços (com `r` e depois de cada operação).
+    pub fn recarregar_servicos(&mut self) {
+        match ops::listar() {
+            Ok(lista) => {
+                let total = lista.len();
+                self.servicos = lista;
+                let n = self.servicos_visiveis().len();
+                self.servicos_sel = self.servicos_sel.min(n.saturating_sub(1));
+                self.set_status(format!("{} serviço(s) carregado(s).", total));
+            }
+            Err(e) => self.set_status(format!("Falha ao listar serviços: {}", e)),
+        }
+    }
+
+    fn opcoes_servico(&self) -> Opcoes {
+        Opcoes {
+            sem_dependentes: false,
+            timeout: Duration::from_secs(self.config.services.timeout_padrao_s),
+        }
+    }
+
+    /// Mostra o resultado na barra de status e grava a linha de auditoria.
+    fn registrar_e_mostrar(&mut self, consulta: &str, rel: &Relatorio) {
+        if let Err(e) = ops::registrar(&PathBuf::from(crate::audit::ARQUIVO_PADRAO), consulta, rel) {
+            error!("Falha ao gravar auditoria de serviços: {}", e);
+        }
+        self.set_status(resumo(rel));
+    }
+
+    /// Planeja a ação sobre o serviço selecionado e abre a confirmação.
+    fn pedir_acao(&mut self, acao: Acao) {
+        match self.alvo_selecionado() {
+            Some(alvo) => self.planejar_e_confirmar(acao, &alvo),
+            None => self.set_status("Nenhum serviço selecionado."),
+        }
+    }
+
+    fn planejar_e_confirmar(&mut self, acao: Acao, alvo: &str) {
+        if self.servico_op.is_some() {
+            self.set_status("Já existe uma operação de serviço em andamento.");
+            return;
+        }
+        let opts = self.opcoes_servico();
+        match ops::planejar(acao, alvo, &opts, &self.servico_escudo) {
+            Ok(plano) => self.modal = ModalState::ServicoConfirm { pendente: Pendente::Acao(plano) },
+            Err(rel) => self.registrar_e_mostrar(alvo, &rel),
+        }
+    }
+
+    /// Executa em thread própria, porque a espera pelo SCM pode levar segundos.
+    fn executar_pendente(&mut self, pendente: Pendente) {
+        if self.servico_op.is_some() {
+            self.set_status("Já existe uma operação de serviço em andamento.");
+            return;
+        }
+        let consulta = match &pendente {
+            Pendente::Acao(plano) => plano.alvo.clone(),
+            Pendente::Criar { nome, .. } => nome.clone(),
+        };
+        let opts = self.opcoes_servico();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let rel = match pendente {
+                Pendente::Acao(plano) => ops::executar(&plano, &opts),
+                Pendente::Criar { nome, exe, exibicao, tipo } => ops::criar(&nome, &exibicao, &exe, tipo),
+            };
+            let _ = tx.send(rel);
+        });
+        self.set_status(format!("Executando ação em '{}'...", consulta));
+        self.servico_op = Some(ServicoEmAndamento { rx, consulta });
+    }
+
+    /// Cancelamento também vai para a auditoria: a decisão de não executar é registrada.
+    fn cancelar_pendente(&mut self, pendente: &Pendente) {
+        let rel = match pendente {
+            Pendente::Acao(plano) => Relatorio {
+                acao: plano.acao,
+                alvo: plano.alvo.clone(),
+                resultado: Resultado::Cancelado,
+                passos: Vec::new(),
+            },
+            Pendente::Criar { nome, tipo, .. } => Relatorio {
+                acao: Acao::Criar(*tipo),
+                alvo: nome.clone(),
+                resultado: Resultado::Cancelado,
+                passos: Vec::new(),
+            },
+        };
+        let consulta = rel.alvo.clone();
+        self.registrar_e_mostrar(&consulta, &rel);
+    }
+
+    /// Recolhe o resultado da operação em segundo plano, sem bloquear a interface.
+    fn poll_servico_op(&mut self) {
+        let Some(op) = self.servico_op.take() else {
+            return;
+        };
+        match op.rx.try_recv() {
+            Ok(rel) => {
+                self.recarregar_servicos();
+                self.registrar_e_mostrar(&op.consulta, &rel);
+            }
+            Err(mpsc::TryRecvError::Empty) => self.servico_op = Some(op),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.set_status("A operação de serviço terminou sem resultado.");
+            }
+        }
+    }
+
+    /// Teclas da aba Serviços. Ações destrutivas sempre passam pela confirmação.
+    fn handle_servicos_key(&mut self, key: KeyEvent) {
+        if self.servicos_busca {
+            match key.code {
+                KeyCode::Char(c) => {
+                    self.servicos_query.push(c);
+                    self.servicos_sel = 0;
+                }
+                KeyCode::Backspace => {
+                    self.servicos_query.pop();
+                    self.servicos_sel = 0;
+                }
+                KeyCode::Enter | KeyCode::Esc => self.servicos_busca = false,
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
+            KeyCode::Down | KeyCode::Char('j') => self.select_next(),
+            KeyCode::Char('/') => self.servicos_busca = true,
+            KeyCode::Char('r') => self.recarregar_servicos(),
+            KeyCode::Char('s') => self.pedir_acao(Acao::Start),
+            KeyCode::Char('t') => self.pedir_acao(Acao::Stop),
+            KeyCode::Char('R') => self.pedir_acao(Acao::Restart),
+            KeyCode::Char('p') => self.pedir_acao(Acao::Pause),
+            KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.pedir_acao(Acao::Continue)
+            }
+            KeyCode::Char('i') => match self.alvo_selecionado() {
+                Some(alvo) => self.modal = ModalState::ServicoInicio { alvo },
+                None => self.set_status("Nenhum serviço selecionado."),
+            },
+            KeyCode::Char('n') => {
+                self.modal = ModalState::ServicoCriar {
+                    campo: CriarCampo::Nome,
+                    nome: String::new(),
+                    exe: String::new(),
+                    exibicao: String::new(),
+                    inicio: StartType::Manual,
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Edita o formulário de criação. Enter valida e leva à confirmação; Esc cancela.
+    fn tecla_criar(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.modal = ModalState::None;
+                self.set_status("Criação de serviço cancelada.");
+                return;
+            }
+            KeyCode::Enter => {
+                self.submeter_criar();
+                return;
+            }
+            _ => {}
+        }
+        let ModalState::ServicoCriar { campo, nome, exe, exibicao, inicio } = &mut self.modal else {
+            return;
+        };
+        match key.code {
+            KeyCode::Tab | KeyCode::Down => *campo = campo.next(),
+            KeyCode::BackTab | KeyCode::Up => *campo = campo.prev(),
+            KeyCode::Backspace => {
+                if let Some(t) = campo_texto(*campo, nome, exe, exibicao) {
+                    t.pop();
+                }
+            }
+            KeyCode::Char(' ') if *campo == CriarCampo::Inicio => *inicio = proximo_inicio(*inicio),
+            KeyCode::Char(c) => {
+                if let Some(t) = campo_texto(*campo, nome, exe, exibicao) {
+                    t.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn submeter_criar(&mut self) {
+        let ModalState::ServicoCriar { nome, exe, exibicao, inicio, .. } = self.modal.clone() else {
+            return;
+        };
+        let validado = nome_valido(&nome).and_then(|_| valida_caminho_criacao(&exe).map(|_| ()));
+        if let Err(m) = validado {
+            self.set_status(m);
+            return;
+        }
+        let exibicao = if exibicao.trim().is_empty() { nome.clone() } else { exibicao };
+        self.modal = ModalState::ServicoConfirm {
+            pendente: Pendente::Criar { nome, exe, exibicao, tipo: inicio },
+        };
+    }
+
     pub fn poll_background(&mut self) {
+        self.poll_servico_op();
         self.poll_disk_scan();
         self.fm.poll();
         self.drenar_mensagem_fm();
@@ -702,6 +1097,70 @@ impl App {
                 }
                 return false;
             }
+            ModalState::ServicoInicio { alvo } => {
+                let alvo = alvo.clone();
+                let tipo = match key.code {
+                    KeyCode::Char('a') => Some(StartType::Automatico),
+                    KeyCode::Char('t') => Some(StartType::AutomaticoAtrasado),
+                    KeyCode::Char('m') => Some(StartType::Manual),
+                    KeyCode::Char('d') => Some(StartType::Desabilitado),
+                    _ => None,
+                };
+                match tipo {
+                    Some(t) => {
+                        self.modal = ModalState::None;
+                        self.planejar_e_confirmar(Acao::MudarInicializacao(t), &alvo);
+                    }
+                    None if key.code == KeyCode::Esc => {
+                        self.modal = ModalState::None;
+                        self.set_status("Mudança de início cancelada.");
+                    }
+                    None => {}
+                }
+                return false;
+            }
+            ModalState::ServicoConfirm { pendente } => {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                        let p = pendente.clone();
+                        self.modal = ModalState::None;
+                        self.executar_pendente(p);
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        let p = pendente.clone();
+                        self.modal = ModalState::None;
+                        self.cancelar_pendente(&p);
+                    }
+                    _ => {}
+                }
+                return false;
+            }
+            ModalState::ServicoCriar { .. } => {
+                self.tecla_criar(key);
+                return false;
+            }
+            ModalState::PlanosPendentes { planos, sel } => {
+                let (planos, sel) = (planos.clone(), *sel);
+                let total = planos.len();
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(2) => self.modal = ModalState::None,
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.modal = ModalState::PlanosPendentes { planos, sel: sel.saturating_sub(1) };
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        let novo = (sel + 1).min(total.saturating_sub(1));
+                        self.modal = ModalState::PlanosPendentes { planos, sel: novo };
+                    }
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                        if let Some(p) = planos.get(sel) {
+                            let id = p.id.clone();
+                            self.aprovar_plano(&id, sel);
+                        }
+                    }
+                    _ => {}
+                }
+                return false;
+            }
             ModalState::ConfirmKill { pids, .. } => {
                 match key.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
@@ -810,6 +1269,12 @@ impl App {
             return false;
         }
 
+        // A busca da aba Serviços captura as teclas antes dos atalhos globais
+        if self.active_tab == ActiveTab::Servicos && self.servicos_busca {
+            self.handle_servicos_key(key);
+            return false;
+        }
+
         // A aba Arquivos, com campo de texto ou modal aberto, recebe todas as teclas
         if self.active_tab == ActiveTab::Files && self.fm.captura_teclado() {
             self.fm.tecla(key);
@@ -826,10 +1291,12 @@ impl App {
             }
             KeyCode::Tab => {
                 self.active_tab = self.active_tab.next();
+                self.garantir_servicos();
                 return false;
             }
             KeyCode::BackTab => {
                 self.active_tab = self.active_tab.prev();
+                self.garantir_servicos();
                 return false;
             }
             KeyCode::Char('1') => {
@@ -856,6 +1323,15 @@ impl App {
                 self.active_tab = ActiveTab::Support;
                 return false;
             }
+            KeyCode::Char('7') => {
+                self.active_tab = ActiveTab::Servicos;
+                self.garantir_servicos();
+                return false;
+            }
+            KeyCode::F(2) => {
+                self.abrir_planos_pendentes();
+                return false;
+            }
             _ => {}
         }
 
@@ -870,6 +1346,7 @@ impl App {
                 self.drenar_mensagem_fm();
             }
             ActiveTab::Support => self.handle_support_key(key).await,
+            ActiveTab::Servicos => self.handle_servicos_key(key),
         }
 
         false
@@ -1372,6 +1849,11 @@ impl App {
                     self.support_table_state.select(Some(self.selected_support_index));
                 }
             }
+            ActiveTab::Servicos => {
+                if self.servicos_sel + 1 < self.servicos_visiveis().len() {
+                    self.servicos_sel += 1;
+                }
+            }
         }
     }
 
@@ -1401,6 +1883,7 @@ impl App {
                 }
             }
             ActiveTab::Files => {}
+            ActiveTab::Servicos => self.servicos_sel = self.servicos_sel.saturating_sub(1),
             ActiveTab::Support => {
                 if self.selected_support_index > 0 {
                     self.selected_support_index -= 1;

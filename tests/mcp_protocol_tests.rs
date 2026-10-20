@@ -105,10 +105,19 @@ fn stdout_so_tem_json_rpc_e_lista_so_as_ferramentas_seguras() {
     assert!(!linhas.is_empty(), "o servidor não respondeu");
     so_json_rpc(&linhas);
     let texto = linhas.join("\n");
-    for esperada in ["processos_listar", "portas_listar", "fs_listar", "processo_planejar_encerramento"] {
+    for esperada in [
+        "processos_listar",
+        "portas_listar",
+        "fs_listar",
+        "processo_planejar_encerramento",
+        "servicos_listar",
+        "servico_detalhar",
+        "servico_planejar_acao",
+    ] {
         assert!(texto.contains(esperada), "faltou {esperada}: {texto}");
     }
     assert!(!texto.contains("plano_aplicar"), "escrita desligada por padrão não deve nem aparecer");
+    assert!(!texto.contains("servico_aplicar"), "aplicar serviço também depende de allow_apply");
     for proibida in ["executar_comando", "shell", "exec"] {
         assert!(!texto.contains(&format!("\"{proibida}\"")), "ferramenta proibida: {proibida}");
     }
@@ -118,7 +127,29 @@ fn stdout_so_tem_json_rpc_e_lista_so_as_ferramentas_seguras() {
 fn com_allow_apply_a_ferramenta_de_aplicar_aparece() {
     let amb = Ambiente::novo("apply", true);
     let linhas = conversar(&amb.config, &[lista()]);
-    assert!(linhas.join("\n").contains("plano_aplicar"));
+    let texto = linhas.join("\n");
+    assert!(texto.contains("plano_aplicar"));
+    assert!(texto.contains("servico_aplicar"));
+}
+
+/// Leitura de serviços e recusa de parada crítica pelo servidor real. Não altera nenhum serviço:
+/// o escudo recusa antes de qualquer chamada de controle.
+#[cfg(windows)]
+#[test]
+fn servicos_listar_e_parada_critica_recusada_pelo_mcp() {
+    let amb = Ambiente::novo("servicos", false);
+    let mut srv = Sessao::abrir(&amb.config);
+
+    let lista = srv.chamar(10, "servicos_listar", r#"{"filtro":"RpcSs"}"#);
+    assert!(lista.contains("RpcSs"), "listagem deve trazer o serviço: {lista}");
+    assert!(lista.contains("\"protegido\":true"), "RpcSs é crítico: {lista}");
+
+    let parada = srv.chamar(11, "servico_planejar_acao", r#"{"nome":"RpcSs","acao":"stop"}"#);
+    assert!(parada.contains("crítico"), "parada de crítico deve ser recusada: {parada}");
+    assert!(!parada.contains("plano_id"), "não pode gerar plano para serviço crítico: {parada}");
+
+    let reiniciar = srv.chamar(12, "servico_planejar_acao", r#"{"nome":"Spooler","acao":"restart"}"#);
+    assert!(reiniciar.contains("start") && reiniciar.contains("stop"), "MCP só aceita start e stop: {reiniciar}");
 }
 
 #[test]
@@ -250,6 +281,49 @@ fn plano_com_aprovacao_humana_encerra_um_processo_de_teste() {
     let de_novo = srv.chamar(4, "plano_aplicar", &format!(r#"{{"plano_id":"{plano_id}","pids":[{pid}]}}"#));
     assert!(de_novo.contains("já foi usado"), "uso único: {de_novo}");
     let _ = alvo.kill();
+}
+
+/// Fluxo de serviço com aprovação humana: planejar a parada, aprovar pelo `cli_admin_v3`, aplicar.
+/// Sem privilégio de Administrador, a aplicação passa pela revalidação e é recusada na hora de
+/// executar, então nenhum serviço é parado. Com privilégio o teste não faz nada, para não parar
+/// um serviço real durante a suíte.
+#[cfg(windows)]
+#[test]
+fn servico_aprovado_revalida_e_exige_administrador_para_executar() {
+    if elevation::is_admin() {
+        eprintln!("suíte elevada: teste de aplicação de serviço pulado para não parar serviços reais");
+        return;
+    }
+    let amb = Ambiente::novo("servico_e2e", true);
+    let mut srv = Sessao::abrir(&amb.config);
+
+    let plano = srv.chamar(1, "servico_planejar_acao", r#"{"nome":"Spooler","acao":"stop"}"#);
+    let Some(plano_id) = serde_json::from_str::<serde_json::Value>(&plano)
+        .ok()
+        .and_then(|v| v["plano_id"].as_str().map(str::to_string))
+    else {
+        eprintln!("Spooler não está em execução nesta máquina: teste pulado ({plano})");
+        return;
+    };
+    let args = format!(r#"{{"plano_id":"{plano_id}","nome":"Spooler","acao":"stop"}}"#);
+
+    let antes = srv.chamar(2, "servico_aplicar", &args);
+    assert!(antes.contains("aguardando aprovação"), "sem aprovação não pode aplicar: {antes}");
+
+    let aprovacao = Command::new(env!("CARGO_BIN_EXE_cli_admin_v3"))
+        .arg("--config")
+        .arg(&amb.config)
+        .args(["mcp", "aprovar", &plano_id])
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(aprovacao.success(), "o humano deveria conseguir aprovar");
+
+    let aplicado = srv.chamar(3, "servico_aplicar", &args);
+    assert!(aplicado.contains("requer executar como Administrador"), "{aplicado}");
+
+    let de_novo = srv.chamar(4, "servico_aplicar", &args);
+    assert!(de_novo.contains("já foi usado"), "uso único: {de_novo}");
 }
 
 #[test]

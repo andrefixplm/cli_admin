@@ -35,6 +35,7 @@
 - Ferramenta `rede_probe` do MCP. A chave `hosts_permitidos` existe na configuração, mas ainda não tem efeito.
 - Transporte HTTP do MCP (fase M4 do spec). Não planejado para agora.
 - Mover, renomear e apagar arquivos no explorador (fora do escopo da primeira versão).
+- **Integração com Google Drive (backlog).** Decisão de análise: primeiro, enviar exports pela **pasta sincronizada** do Drive for desktop (`[drive]` no config, desligado por padrão, redação de linha de comando, auditoria sem conteúdo). Fontes iniciais: snapshot de serviços e export de processos. Conta pessoal. Cliente nativo com OAuth (`drive.file`) fica para depois, porque em modo Testing o refresh token expira em 7 dias. Fatos sobre o Google vieram de fontes secundárias e precisam ser confirmados antes da implementação.
 
 ## Documentação e repositório
 

@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub support: SupportConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub services: ServicesConfig,
 }
 
 impl Default for AppConfig {
@@ -34,6 +36,7 @@ impl Default for AppConfig {
             netdiag: NetdiagConfig::default(),
             support: SupportConfig::default(),
             mcp: McpConfig::default(),
+            services: ServicesConfig::default(),
         }
     }
 }
@@ -369,6 +372,30 @@ impl Default for SupportConfig {
     fn default() -> Self {
         Self {
             disk_top_n: default_disk_top_n(),
+        }
+    }
+}
+
+/// Gerenciamento de serviços do Windows (CLI `servicos` e aba Serviços da TUI).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServicesConfig {
+    /// Serviços além da lista fixa de críticos, protegidos contra parada e reinício.
+    #[serde(default)]
+    pub protected_names: Vec<String>,
+    /// Tempo máximo de espera, em segundos, por cada passo (parar, iniciar, pausar, continuar).
+    #[serde(default = "default_services_timeout")]
+    pub timeout_padrao_s: u64,
+}
+
+fn default_services_timeout() -> u64 {
+    30
+}
+
+impl Default for ServicesConfig {
+    fn default() -> Self {
+        Self {
+            protected_names: Vec::new(),
+            timeout_padrao_s: default_services_timeout(),
         }
     }
 }

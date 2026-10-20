@@ -1,5 +1,12 @@
+use cli_admin::audit;
 use cli_admin::config::{AppConfig, VmConfigEntry};
 use cli_admin::logger;
+use cli_admin::modules::services::models::{
+    Resolucao, nome_valido, resolver_alvo, valida_caminho_criacao,
+};
+use cli_admin::modules::services::{
+    Acao, Opcoes, Relatorio, Resultado, ServiceShield, StartType, ops, scm,
+};
 use cli_admin::modules::net::{self, NetProtoFilter};
 use cli_admin::modules::process::killer::separar_protegidos;
 use cli_admin::modules::process::{export, ProcessFilter, ProcessItem, ProcessKiller, ProcessShield};
@@ -10,7 +17,7 @@ use cli_admin::modules::top::{
 use cli_admin::modules::vmware::{StartMode, StopMode, VmDiscovery, VmwareClient};
 use cli_admin::tui;
 use clap::{Args, Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::info;
 
@@ -61,6 +68,9 @@ enum Commands {
 
     /// Suporte Windows: disco, snapshot de serviços, boot
     Winsys(WinsysArgs),
+
+    /// Serviços do Windows: listar, controlar (start/stop/restart/pause/continue), mudar início e criar
+    Servicos(ServicosArgs),
 
     /// Exporta a lista de processos (CSV ou JSON) com a linha de comando de cada um
     Export(ExportArgs),
@@ -413,6 +423,95 @@ enum WinsysAction {
     BootAudit,
 }
 
+#[derive(Args, Debug)]
+struct ServicosArgs {
+    #[command(subcommand)]
+    action: ServicosAction,
+}
+
+#[derive(Args, Debug)]
+struct ControleArgs {
+    /// Nome exato do serviço, ou parte do nome / nome de exibição
+    nome: String,
+    /// Só mostra o plano, sem alterar nada
+    #[arg(long)]
+    dry_run: bool,
+    /// Não pede confirmação
+    #[arg(short = 'y', long)]
+    yes: bool,
+    /// Recusa se houver dependentes ativos, em vez de pará-los
+    #[arg(long)]
+    sem_dependentes: bool,
+    /// Tempo máximo de espera por passo, em segundos (padrão: config)
+    #[arg(long)]
+    timeout: Option<u64>,
+}
+
+#[derive(Subcommand, Debug)]
+enum ServicosAction {
+    /// Lista serviços com estado e tipo de inicialização
+    List {
+        /// Filtra por nome ou nome de exibição
+        #[arg(long)]
+        filtro: Option<String>,
+        /// Estado: running, stopped ou paused
+        #[arg(long)]
+        estado: Option<String>,
+    },
+
+    /// Mostra detalhes de um serviço, incluindo dependências
+    Detalhe {
+        /// Nome exato ou parte do nome
+        nome: String,
+    },
+
+    /// Inicia um serviço (e as dependências paradas)
+    Start(ControleArgs),
+
+    /// Para um serviço (e os dependentes ativos, salvo --sem-dependentes)
+    Stop(ControleArgs),
+
+    /// Reinicia um serviço
+    Restart(ControleArgs),
+
+    /// Pausa um serviço em execução
+    Pause(ControleArgs),
+
+    /// Retoma um serviço pausado
+    Continue(ControleArgs),
+
+    /// Muda o tipo de inicialização: auto, atrasado, manual ou desabilitado
+    SetStart {
+        /// Nome exato ou parte do nome
+        nome: String,
+        /// Novo tipo de inicialização
+        tipo: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
+    /// Cria um serviço Win32 apontando para um executável (conta LocalSystem)
+    Criar {
+        /// Nome interno do serviço (sem espaços nas pontas, sem / ou \)
+        nome: String,
+        /// Caminho absoluto do executável .exe
+        #[arg(long)]
+        exe: PathBuf,
+        /// Nome de exibição (padrão: o próprio nome)
+        #[arg(long)]
+        display: Option<String>,
+        /// Tipo de inicialização: auto, atrasado, manual ou desabilitado
+        #[arg(long, default_value = "manual")]
+        start: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -444,6 +543,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Commands::Notes(args) => handle_notes_cli(config, args).await?,
             Commands::Netdiag(args) => handle_netdiag_cli(config, args).await?,
             Commands::Winsys(args) => handle_winsys_cli(config, args).await?,
+            Commands::Servicos(args) => handle_servicos_cli(config, args)?,
             Commands::Export(args) => handle_export_cli(config, args).await?,
             Commands::Mcp(args) => handle_mcp_cli(config, args)?,
         },
@@ -471,7 +571,13 @@ fn handle_mcp_cli(config: AppConfig, args: McpArgs) -> Result<(), Box<dyn std::e
             }
         }
         McpAction::Aprovar { id } => match approval::aprovar(&pasta, &id, agora) {
-            Ok(p) => println!("Plano {} aprovado: {}", p.id, p.descricao),
+            Ok(p) => {
+                let msg = format!("plano={} ferramenta={} aprovado_por=cli", p.id, p.ferramenta);
+                if let Err(e) = audit::registrar(&std::path::PathBuf::from(&config.mcp.auditoria), "mcp.aprovar", "ok", &msg) {
+                    eprintln!("aviso: falha ao gravar auditoria: {e}");
+                }
+                println!("Plano {} aprovado: {}", p.id, p.descricao);
+            }
             Err(e) => {
                 eprintln!("não foi possível aprovar: {e}");
                 std::process::exit(1);
@@ -1240,6 +1346,230 @@ async fn handle_winsys_cli(
                 println!("[{}] {} ({})", item.source, item.name, item.command);
             }
             println!();
+        }
+    }
+    Ok(())
+}
+
+/// Imprime o relatório e grava a linha de auditoria.
+fn finalizar_servico(arquivo: &Path, consulta: &str, rel: &Relatorio) {
+    imprimir_relatorio_servico(rel);
+    if let Err(e) = ops::registrar(arquivo, consulta, rel) {
+        eprintln!("✖ Falha ao gravar auditoria em {}: {}", arquivo.display(), e);
+    }
+}
+
+fn imprimir_relatorio_servico(rel: &Relatorio) {
+    match &rel.resultado {
+        Resultado::Concluido => {
+            println!("✔ {} concluído", rel.alvo);
+            for p in &rel.passos {
+                println!("   • {}", p);
+            }
+        }
+        Resultado::DryRun => {
+            println!("✔ [DRY-RUN] nada foi alterado. Passos previstos para {}:", rel.alvo);
+            for p in &rel.passos {
+                println!("   • {}", p);
+            }
+        }
+        Resultado::Cancelado => println!("• {}: operação cancelada pelo usuário", rel.alvo),
+        Resultado::NoOp(m) => println!("• {}: {}", rel.alvo, m),
+        Resultado::Recusado(m) => eprintln!("✖ {} recusado: {}", rel.alvo, m),
+        Resultado::Falhou(m) => {
+            eprintln!("✖ {}: {}", rel.alvo, m);
+            for p in &rel.passos {
+                eprintln!("   concluído antes da falha: {}", p);
+            }
+        }
+    }
+}
+
+/// Fluxo comum de start/stop/restart/pause/continue/set-start:
+/// planeja, mostra o plano, pede confirmação, executa e audita.
+fn executar_acao_servico(
+    acao: Acao,
+    consulta: &str,
+    dry_run: bool,
+    yes: bool,
+    opts: &Opcoes,
+    escudo: &ServiceShield,
+    arquivo: &Path,
+) {
+    let plano = match ops::planejar(acao, consulta, opts, escudo) {
+        Ok(p) => p,
+        Err(rel) => return finalizar_servico(arquivo, consulta, &rel),
+    };
+    let previsto = ops::simulacao(&plano);
+
+    if dry_run {
+        if !scm::e_elevado() {
+            println!("⚠ Sem privilégio de Administrador: a execução real seria recusada.");
+        }
+        return finalizar_servico(arquivo, consulta, &previsto);
+    }
+
+    if !yes {
+        println!("Plano para '{}':", plano.alvo);
+        for p in &previsto.passos {
+            println!("   • {}", p);
+        }
+        if !scm::e_elevado() {
+            println!("⚠ Sem privilégio de Administrador: a execução será recusada.");
+        }
+        let confirmado = confirmar("Executar este plano?").unwrap_or(false);
+        if !confirmado {
+            let rel = Relatorio {
+                acao,
+                alvo: plano.alvo.clone(),
+                resultado: Resultado::Cancelado,
+                passos: Vec::new(),
+            };
+            return finalizar_servico(arquivo, consulta, &rel);
+        }
+    }
+
+    println!("Executando {}...", plano.alvo);
+    let rel = ops::executar(&plano, opts);
+    finalizar_servico(arquivo, consulta, &rel);
+}
+
+fn handle_servicos_cli(
+    config: AppConfig,
+    args: ServicosArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let escudo = ServiceShield::new(&config.services.protected_names);
+    let arquivo = PathBuf::from(audit::ARQUIVO_PADRAO);
+    let timeout_padrao = Duration::from_secs(config.services.timeout_padrao_s);
+    let opcoes = |sem_dependentes: bool, timeout: Option<u64>| Opcoes {
+        sem_dependentes,
+        timeout: timeout.map(Duration::from_secs).unwrap_or(timeout_padrao),
+    };
+
+    match args.action {
+        ServicosAction::List { filtro, estado } => {
+            let lista = ops::listar()?;
+            let filtro = filtro.map(|f| f.to_lowercase());
+            let estado = estado.map(|e| e.to_lowercase());
+
+            println!("\n=== SERVIÇOS DO WINDOWS ===");
+            println!("{:<28} {:<32} {:<10} {:<18} {}", "NOME", "EXIBIÇÃO", "ESTADO", "INÍCIO", "");
+            let mut total = 0usize;
+            for s in lista.iter().filter(|s| {
+                filtro.as_ref().is_none_or(|f| {
+                    s.name.to_lowercase().contains(f) || s.display_name.to_lowercase().contains(f)
+                }) && estado.as_ref().is_none_or(|e| s.state.label().eq_ignore_ascii_case(e))
+            }) {
+                let marca = if escudo.e_protegido(&s.name) { "🛡️ CRÍTICO" } else { "" };
+                println!(
+                    "{:<28} {:<32} {:<10} {:<18} {}",
+                    s.name,
+                    s.display_name.chars().take(31).collect::<String>(),
+                    s.state.label(),
+                    s.start_type.label(),
+                    marca
+                );
+                total += 1;
+            }
+            println!("\nTotal: {}", total);
+        }
+
+        ServicosAction::Detalhe { nome } => {
+            let base = support::list_services()?;
+            let alvo = match resolver_alvo(&nome, &base) {
+                Resolucao::Unico(n) => n,
+                Resolucao::Ambiguo(v) => {
+                    eprintln!("✖ consulta ambígua, use o nome exato: {}", v.join(", "));
+                    return Ok(());
+                }
+                Resolucao::NaoEncontrado => {
+                    eprintln!("✖ serviço não encontrado: {}", nome);
+                    return Ok(());
+                }
+            };
+            let d = scm::detalhe(&alvo)?;
+            let deps = scm::dependencias(&alvo)?;
+            let dependentes = scm::dependentes_ativos(&alvo)?;
+            let lista = |v: &[String]| if v.is_empty() { "-".to_string() } else { v.join(", ") };
+
+            println!("\n=== {} ===", d.name);
+            println!("Exibição          : {}", d.display_name);
+            println!("Estado            : {}", d.state.label());
+            println!("Início            : {}", d.start_type.label());
+            println!("Caminho           : {}", d.binary_path);
+            println!("Conta             : {}", d.account);
+            println!(
+                "Crítico           : {}",
+                if escudo.e_protegido(&d.name) { "sim (parar e reiniciar bloqueados)" } else { "não" }
+            );
+            println!("Depende de        : {}", lista(&deps));
+            println!("Dependentes ativos: {}", lista(&dependentes));
+        }
+
+        ServicosAction::Start(c) => executar_acao_servico(
+            Acao::Start, &c.nome, c.dry_run, c.yes, &opcoes(c.sem_dependentes, c.timeout), &escudo, &arquivo,
+        ),
+        ServicosAction::Stop(c) => executar_acao_servico(
+            Acao::Stop, &c.nome, c.dry_run, c.yes, &opcoes(c.sem_dependentes, c.timeout), &escudo, &arquivo,
+        ),
+        ServicosAction::Restart(c) => executar_acao_servico(
+            Acao::Restart, &c.nome, c.dry_run, c.yes, &opcoes(c.sem_dependentes, c.timeout), &escudo, &arquivo,
+        ),
+        ServicosAction::Pause(c) => executar_acao_servico(
+            Acao::Pause, &c.nome, c.dry_run, c.yes, &opcoes(c.sem_dependentes, c.timeout), &escudo, &arquivo,
+        ),
+        ServicosAction::Continue(c) => executar_acao_servico(
+            Acao::Continue, &c.nome, c.dry_run, c.yes, &opcoes(c.sem_dependentes, c.timeout), &escudo, &arquivo,
+        ),
+
+        ServicosAction::SetStart { nome, tipo, dry_run, yes } => {
+            let tipo = StartType::parse(&tipo)
+                .ok_or("tipo inválido: use auto, atrasado, manual ou desabilitado")?;
+            executar_acao_servico(
+                Acao::MudarInicializacao(tipo),
+                &nome,
+                dry_run,
+                yes,
+                &opcoes(false, None),
+                &escudo,
+                &arquivo,
+            );
+        }
+
+        ServicosAction::Criar { nome, exe, display, start, dry_run, yes } => {
+            let tipo = StartType::parse(&start)
+                .ok_or("tipo inválido: use auto, atrasado, manual ou desabilitado")?;
+            // Tudo que pode ser validado sem efeito é validado antes de perguntar.
+            nome_valido(&nome)?;
+            let exe_txt = exe.to_string_lossy().to_string();
+            let binario = valida_caminho_criacao(&exe_txt)?;
+            let exibicao = display.unwrap_or_else(|| nome.clone());
+            let acao = Acao::Criar(tipo);
+
+            println!("Plano para criar '{}':", nome);
+            println!("   • serviço '{}' ({}) apontando para {}", nome, tipo.label(), binario);
+            println!("   • conta: LocalSystem (padrão do SCM)");
+
+            if dry_run {
+                let rel = Relatorio {
+                    acao,
+                    alvo: nome.clone(),
+                    resultado: Resultado::DryRun,
+                    passos: vec![format!("criar {} apontando para {}", nome, binario)],
+                };
+                return Ok(finalizar_servico(&arquivo, &nome, &rel));
+            }
+            if !yes && !confirmar("Criar este serviço?")? {
+                let rel = Relatorio {
+                    acao,
+                    alvo: nome.clone(),
+                    resultado: Resultado::Cancelado,
+                    passos: Vec::new(),
+                };
+                return Ok(finalizar_servico(&arquivo, &nome, &rel));
+            }
+            let rel = ops::criar(&nome, &exibicao, &exe_txt, tipo);
+            finalizar_servico(&arquivo, &nome, &rel);
         }
     }
     Ok(())
